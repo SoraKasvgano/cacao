@@ -9,6 +9,7 @@ import (
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
+	"gorm.io/gorm"
 )
 
 func LoginMiddleware() gin.HandlerFunc {
@@ -38,8 +39,12 @@ func LoginMiddleware() gin.HandlerFunc {
 		}
 		if !strings.HasPrefix(user.Token, "sha256:") {
 			// Upgrade stored legacy tokens without changing the browser cookie.
-			result := db.Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).UpdateColumn("token", hashSessionToken(token))
-			if result.Error != nil {
+			var result *gorm.DB
+			err := storage.WriteContext(c.Request.Context(), func(tx *gorm.DB) error {
+				result = tx.Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).UpdateColumn("token", hashSessionToken(token))
+				return result.Error
+			})
+			if err != nil {
 				setErrorCode(c, Unexpected)
 				c.Abort()
 				return
@@ -71,11 +76,15 @@ func UserInfo(c *gin.Context) {
 
 func UserStatistics(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
+	statistics, err := model.GetUserStatistics(user.ID)
+	if !writeSucceeded(c, err) {
+		return
+	}
 	setResponseData(c, gin.H{
-		"netnum": uint(len(model.GetNetsByUserID(user.ID))),
-		"devnum": uint(len(model.GetDevicesByUserID(user.ID))),
-		"rxsum":  model.GetRxSumByUserID(user.ID),
-		"txsum":  model.GetTxSumByUserID(user.ID),
+		"netnum": statistics.NetNum,
+		"devnum": statistics.DevNum,
+		"rxsum":  statistics.RxSum,
+		"txsum":  statistics.TxSum,
 	})
 }
 
@@ -92,8 +101,6 @@ func UserRegister(c *gin.Context) {
 	if !allowAuthentication(c, request.Username) {
 		return
 	}
-	registrationMu.Lock()
-	defer registrationMu.Unlock()
 	db := storage.Get()
 	var count int64
 	if err := db.Unscoped().Model(&model.User{}).Count(&count).Error; err != nil {
@@ -123,24 +130,10 @@ func UserRegister(c *gin.Context) {
 		setErrorCode(c, InvalidPassword)
 		return
 	}
-
-	if func() bool {
-		count := int64(0)
-		db.Model(&model.User{}).Where(&model.User{IP: c.ClientIP(), Role: "normal"}).Where("created_at > ?", time.Now().Add(-1*registerInterval())).Count(&count)
-		return count > 0
-	}() {
-		setErrorCode(c, RegisterTooOften)
+	if !acquirePasswordWork(c) {
 		return
 	}
-
-	if func() bool {
-		count := int64(0)
-		db.Model(&model.User{}).Where(&model.User{Name: request.Username}).Count(&count)
-		return count > 0
-	}() {
-		setErrorCode(c, UsernameAlreadyTaken)
-		return
-	}
+	defer func() { <-passwordWork }()
 
 	role := "normal"
 	if initialSetup {
@@ -154,10 +147,14 @@ func UserRegister(c *gin.Context) {
 		IP:       c.ClientIP(),
 	}
 	token := newSession(&user)
-
-	if result := db.Create(&user); result.Error != nil {
-		setUnexpectedMessage(c, result.Error.Error())
+	netModel := &model.Net{Name: "@", Password: randomString(8), DHCP: "192.168.202.0/24", Broadcast: true}
+	if !writeSucceeded(c, createAccount(c, &user, netModel, true, validSetupToken(request.SetupToken))) {
 		return
+	}
+	if user.Role == "normal" {
+		if !writeSucceeded(c, candy.SyncNet(netModel.ID)) {
+			return
+		}
 	}
 
 	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
@@ -167,21 +164,6 @@ func UserRegister(c *gin.Context) {
 		"role": user.Role,
 	})
 
-	if role == "admin" {
-		model.SetConfig("openreg", "false")
-	}
-
-	if role == "normal" {
-		netModel := &model.Net{
-			UserID:    user.ID,
-			Name:      "@",
-			Password:  randomString(8),
-			DHCP:      "192.168.202.0/24",
-			Broadcast: true,
-		}
-		netModel.Create()
-		candy.InsertNet(netModel)
-	}
 }
 
 func UserLogin(c *gin.Context) {
@@ -225,10 +207,17 @@ func UserLogin(c *gin.Context) {
 		user.Password = hashUserPassword(user.Name, request.Password)
 	}
 	token := newSession(&user)
-	result := db.Model(&model.User{}).Where("id = ? AND password = ?", user.ID, previousPassword).Updates(map[string]interface{}{
-		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt, "ip": user.IP,
+	var result *gorm.DB
+	err := storage.WriteContext(c.Request.Context(), func(tx *gorm.DB) error {
+		result = tx.Model(&model.User{}).Where("id = ? AND password = ?", user.ID, previousPassword).Updates(map[string]interface{}{
+			"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt, "ip": user.IP,
+		})
+		return result.Error
 	})
-	if result.Error != nil || result.RowsAffected != 1 {
+	if !writeSucceeded(c, err) {
+		return
+	}
+	if result.RowsAffected != 1 {
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -242,9 +231,10 @@ func UserLogin(c *gin.Context) {
 
 func UserLogout(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
-	result := storage.Get().Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).Updates(map[string]interface{}{"token": "", "token_expires_at": nil})
-	if result.Error != nil {
-		setErrorCode(c, Unexpected)
+	err := storage.WriteContext(c.Request.Context(), func(tx *gorm.DB) error {
+		return tx.Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).Updates(map[string]interface{}{"token": "", "token_expires_at": nil}).Error
+	})
+	if !writeSucceeded(c, err) {
 		return
 	}
 	setSessionCookies(c, 0, "", -1)
@@ -284,10 +274,17 @@ func ChangePassword(c *gin.Context) {
 	previousPassword, previousToken := user.Password, user.Token
 	user.Password = hashUserPassword(user.Name, request.NewPassword)
 	token := newSession(user)
-	result := storage.Get().Model(&model.User{}).Where("id = ? AND password = ? AND token = ?", user.ID, previousPassword, previousToken).Updates(map[string]interface{}{
-		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt,
+	var result *gorm.DB
+	err := storage.WriteContext(c.Request.Context(), func(tx *gorm.DB) error {
+		result = tx.Model(&model.User{}).Where("id = ? AND password = ? AND token = ?", user.ID, previousPassword, previousToken).Updates(map[string]interface{}{
+			"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt,
+		})
+		return result.Error
 	})
-	if result.Error != nil || result.RowsAffected != 1 {
+	if !writeSucceeded(c, err) {
+		return
+	}
+	if result.RowsAffected != 1 {
 		setErrorCode(c, NotLoggedIn)
 		return
 	}

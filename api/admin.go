@@ -9,6 +9,7 @@ import (
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
+	"gorm.io/gorm"
 )
 
 func AdminMiddleware() gin.HandlerFunc {
@@ -39,7 +40,10 @@ func AdminMiddleware() gin.HandlerFunc {
 }
 
 func AdminShowUsers(c *gin.Context) {
-	users := model.GetUsers()
+	users, err := model.GetUsersWithStatistics()
+	if !writeSucceeded(c, err) {
+		return
+	}
 
 	type userinfo struct {
 		UserID         uint   `json:"userid"`
@@ -60,11 +64,11 @@ func AdminShowUsers(c *gin.Context) {
 			Username:       u.Name,
 			Role:           u.Role,
 			RegTime:        u.CreatedAt.Format(time.DateTime),
-			LastActiveTime: model.GetLastActiveTimeByUserID(u.ID).Format(time.DateTime),
-			NetNum:         uint(len(model.GetNetsByUserID(u.ID))),
-			DevNum:         uint(len(model.GetDevicesByUserID(u.ID))),
-			RxSum:          model.GetRxSumByUserID(u.ID),
-			TxSum:          model.GetTxSumByUserID(u.ID),
+			LastActiveTime: u.UpdatedAt.Format(time.DateTime),
+			NetNum:         u.NetNum,
+			DevNum:         u.DevNum,
+			RxSum:          u.RxSum,
+			TxSum:          u.TxSum,
 		})
 	}
 
@@ -74,8 +78,6 @@ func AdminShowUsers(c *gin.Context) {
 }
 
 func AdminAddUser(c *gin.Context) {
-	registrationMu.Lock()
-	defer registrationMu.Unlock()
 	var request struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -93,41 +95,25 @@ func AdminAddUser(c *gin.Context) {
 		return
 	}
 
-	db := storage.Get()
-	if func() bool {
-		count := int64(0)
-		db.Model(&model.User{}).Where(&model.User{Name: request.Username}).Count(&count)
-		return count > 0
-	}() {
-		setErrorCode(c, UsernameAlreadyTaken)
-		return
-	}
-
 	user := model.User{
 		Name:     request.Username,
 		Password: hashUserPassword(request.Username, request.Password),
 		Role:     "normal",
 	}
 
-	if result := db.Create(&user); result.Error != nil {
-		setUnexpectedMessage(c, result.Error.Error())
-		return
-	}
-
-	setResponseData(c, gin.H{
-		"name": user.Name,
-		"role": user.Role,
-	})
-
 	netModel := &model.Net{
-		UserID:    user.ID,
 		Name:      "@",
 		Password:  randomString(8),
 		DHCP:      "192.168.202.0/24",
 		Broadcast: true,
 	}
-	netModel.Create()
-	candy.InsertNet(netModel)
+	if !writeSucceeded(c, createAccount(c, &user, netModel, false, false)) {
+		return
+	}
+	if !writeSucceeded(c, candy.SyncNet(netModel.ID)) {
+		return
+	}
+	setResponseData(c, gin.H{"name": user.Name, "role": user.Role})
 }
 
 func AdminDeleteUser(c *gin.Context) {
@@ -146,13 +132,13 @@ func AdminDeleteUser(c *gin.Context) {
 		return
 	}
 
-	nets := model.GetNetsByUserID(request.UserID)
-	for _, n := range nets {
-		candy.DeleteNet(n.ID)
-		model.DeleteDevicesByNetID(n.ID)
-		model.DeleteNetByNetID(n.ID)
+	netIDs, err := model.DeleteUserTree(request.UserID)
+	if !writeSucceeded(c, err) {
+		return
 	}
-	model.DeleteUserByUserID(request.UserID)
+	for _, id := range netIDs {
+		candy.DeleteNet(id)
+	}
 	setResponseData(c, nil)
 }
 
@@ -180,10 +166,18 @@ func AdminUpdateUserPassword(c *gin.Context) {
 		setErrorCode(c, Unexpected)
 		return
 	}
-	if err := db.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
-		"password": hashUserPassword(user.Name, request.Password), "token": "", "token_expires_at": nil,
-	}).Error; err != nil {
-		setErrorCode(c, Unexpected)
+	password := hashUserPassword(user.Name, request.Password)
+	err := storage.WriteContext(c.Request.Context(), func(tx *gorm.DB) error {
+		result := tx.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{"password": password, "token": "", "token_expires_at": nil})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return businessError(UserNotExists)
+		}
+		return nil
+	})
+	if !writeSucceeded(c, err) {
 		return
 	}
 	setResponseData(c, nil)
@@ -204,10 +198,8 @@ func AdminSetOpenRegisterConfig(c *gin.Context) {
 		setErrorCode(c, InvalidRequest)
 		return
 	}
-	if request.OpenReg {
-		model.SetConfig("openreg", "true")
-	} else {
-		model.SetConfig("openreg", "false")
+	if !writeSucceeded(c, model.SetConfig("openreg", strconv.FormatBool(request.OpenReg))) {
+		return
 	}
 	setResponseData(c, nil)
 }
@@ -232,7 +224,9 @@ func AdminSetRegisterIntervalConfig(c *gin.Context) {
 		return
 	}
 
-	model.SetConfig("reginterval", strconv.FormatUint(uint64(request.RegInterval), 10))
+	if !writeSucceeded(c, model.SetConfig("reginterval", strconv.FormatUint(uint64(request.RegInterval), 10))) {
+		return
+	}
 	setResponseData(c, nil)
 }
 
@@ -251,10 +245,8 @@ func AdminSetAutoCleanUserConfig(c *gin.Context) {
 		setErrorCode(c, InvalidRequest)
 		return
 	}
-	if request.AutoCleanInactiveUser {
-		model.SetConfig("autoCleanUser", "true")
-	} else {
-		model.SetConfig("autoCleanUser", "false")
+	if !writeSucceeded(c, model.SetConfig("autoCleanUser", strconv.FormatBool(request.AutoCleanInactiveUser))) {
+		return
 	}
 	setResponseData(c, nil)
 }
@@ -283,11 +275,12 @@ func AdminSetInactiveUserThresholdConfig(c *gin.Context) {
 		return
 	}
 
-	model.SetConfig("inactiveUserThreshold", strconv.FormatUint(uint64(request.InactiveUserThreshold), 10))
+	if !writeSucceeded(c, model.SetConfig("inactiveUserThreshold", strconv.FormatUint(uint64(request.InactiveUserThreshold), 10))) {
+		return
+	}
 	setResponseData(c, nil)
 }
 
 func AdminCleanInactiveUser(c *gin.Context) {
-	candy.CleanInactiveUser()
-	setResponseData(c, nil)
+	triggerBackgroundTask(c, "clean-inactive-users")
 }

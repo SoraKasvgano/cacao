@@ -1,10 +1,10 @@
 package api
 
 import (
+	"errors"
 	"github.com/gin-gonic/gin"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
-	"github.com/lanthora/cacao/storage"
 	"gorm.io/gorm"
 )
 
@@ -74,18 +74,21 @@ func NetInsert(c *gin.Context) {
 		Name:   request.Netname,
 	}
 
-	db := storage.Get()
-	result := db.Where(netModel).Take(netModel)
-	if result.Error != gorm.ErrRecordNotFound {
-		setErrorCode(c, NetworkAlreadyExists)
-		return
-	}
-
 	netModel.Password = request.Password
 	netModel.DHCP = request.DHCP
 	netModel.Broadcast = request.Broadcast
-	netModel.Create()
-	candy.InsertNet(netModel)
+	netModel.Lease = request.Lease
+	if err := netModel.Create(); err != nil {
+		if errors.Is(err, model.ErrConflict) {
+			setErrorCode(c, NetworkAlreadyExists)
+		} else {
+			setErrorCode(c, Unexpected)
+		}
+		return
+	}
+	if !writeSucceeded(c, candy.SyncNet(netModel.ID)) {
+		return
+	}
 
 	setResponseData(c, gin.H{
 		"netid":     netModel.ID,
@@ -140,8 +143,17 @@ func NetEdit(c *gin.Context) {
 	netModel.DHCP = request.DHCP
 	netModel.Broadcast = request.Broadcast
 	netModel.Lease = request.Lease
-	netModel.Update()
-	candy.UpdateNet(&netModel)
+	if err := netModel.Update(); err != nil {
+		if errors.Is(err, model.ErrConflict) {
+			setErrorCode(c, NetworkAlreadyExists)
+		} else {
+			setErrorCode(c, Unexpected)
+		}
+		return
+	}
+	if !writeSucceeded(c, candy.SyncNet(netModel.ID)) {
+		return
+	}
 
 	setResponseData(c, gin.H{
 		"netid":     netModel.ID,
@@ -164,21 +176,18 @@ func NetDelete(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
-	netModel := &model.Net{}
-	netModel.ID = request.ID
-	db := storage.Get()
-	result := db.Where("id = ? AND user_id = ?", request.ID, user.ID).Take(netModel)
-
-	if result.Error != nil || netModel.UserID != user.ID {
-		setErrorCode(c, NetworkNotExists)
+	if err := model.DeleteNetworkTree(request.ID, user.ID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			setErrorCode(c, NetworkNotExists)
+		} else {
+			setErrorCode(c, Unexpected)
+		}
 		return
 	}
-
-	netModel.Delete()
-	candy.DeleteNet(netModel.ID)
+	candy.DeleteNet(request.ID)
 
 	setResponseData(c, gin.H{
-		"id": netModel.ID,
+		"id": request.ID,
 	})
 }
 

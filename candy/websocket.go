@@ -43,6 +43,11 @@ func WebsocketMiddleware() gin.HandlerFunc {
 }
 
 func handleWebsocket(c *gin.Context) {
+	if !beginWebsocketHandler() {
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	defer endWebsocketHandler()
 	net := getNetByPath(c.Request.URL.Path)
 	if net == nil {
 		c.Status(http.StatusNotFound)
@@ -64,6 +69,10 @@ func handleWebsocket(c *gin.Context) {
 	defer conn.Close()
 	conn.SetReadLimit(maxWebsocketMessageSize)
 	ws := &candysocket{ctx: c, conn: conn, net: net, authDeadline: time.Now().Add(websocketAuthTimeout)}
+	if !trackWebsocket(ws) {
+		return
+	}
+	defer untrackWebsocket(ws)
 	net.ipWsMapMutex.Lock()
 	if net.closed {
 		net.ipWsMapMutex.Unlock()
@@ -119,7 +128,7 @@ func (ws *candysocket) disconnect() {
 		ws.dev.mutex.Lock()
 		defer ws.dev.mutex.Unlock()
 		ws.dev.model.Online = false
-		ws.dev.model.SaveRxTxOnline()
+		model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 	}
 }
 
@@ -202,7 +211,7 @@ func (ws *candysocket) handlePingMessage(buffer string) error {
 	}
 
 	if ws.dev.model.Online {
-		ws.dev.model.SaveOsVersionHostname()
+		model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 	}
 
 	return ws.writePong([]byte(buffer))
@@ -232,29 +241,27 @@ func (ws *candysocket) handleAuthMessage(buffer []byte) error {
 	if ws.net.closed {
 		return fmt.Errorf("auth failed: network has been revoked")
 	}
-	if ws.net.ipConflict(uint32ToStrIp(message.IP), ws.dev.model.VMac) {
-		ws.writeCloseMessage("ip conflict")
-		return fmt.Errorf("auth failed: ip conflict: %v", uint32ToStrIp(message.IP))
+	country, region := GetLocation(net.ParseIP(ws.ctx.ClientIP()))
+	device, generation, err := model.AuthenticateDevice(ws.ctx.Request.Context(), ws.net.model.ID, ws.net.model.Password, ws.dev.model.VMac, uint32ToStrIp(message.IP), country, region)
+	if err != nil {
+		ws.writeCloseMessage("device registration failed")
+		return fmt.Errorf("auth failed: %w", err)
 	}
-
-	if oldws, ok := ws.net.ipWsMap[message.IP]; ok {
+	// Retire the same identity even if it reconnects at a different IP. A failed
+	// durable registration leaves the existing connection untouched.
+	for ip, oldws := range ws.net.ipWsMap {
+		if oldws.dev.model.ID != device.ID {
+			continue
+		}
 		oldws.authenticated.Store(false)
 		oldws.dev.mutex.Lock()
 		oldws.dev.model.Online = false
-		oldws.dev.model.SaveRxTxOnline()
 		oldws.dev.mutex.Unlock()
 		oldws.conn.Close()
+		delete(ws.net.ipWsMap, ip)
 	}
-
-	ws.dev.ip = message.IP
+	ws.dev.model, ws.dev.generation, ws.dev.ip = &device, generation, message.IP
 	ws.net.ipWsMap[message.IP] = ws
-
-	db := storage.Get()
-	db.Where(ws.dev.model).First(ws.dev.model)
-	ws.dev.model.IP = uint32ToStrIp(message.IP)
-	ws.dev.model.Online = true
-	ws.dev.model.Country, ws.dev.model.Region = GetLocation(net.ParseIP(ws.ctx.ClientIP()))
-	ws.dev.model.Save()
 	ws.authenticated.Store(true)
 
 	ws.updateSystemRoute()
@@ -467,7 +474,7 @@ func (ws *candysocket) handlePeerConnMessage(buffer []byte) error {
 	ws.dev.mutex.Lock()
 	defer ws.dev.mutex.Unlock()
 	ws.dev.model.Country, ws.dev.model.Region = country, region
-	ws.dev.model.Save()
+	model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 
 	return nil
 }
@@ -603,10 +610,12 @@ func (ws *candysocket) addTX(size int) {
 	ws.dev.mutex.Lock()
 	defer ws.dev.mutex.Unlock()
 	ws.dev.model.TX += uint64(size)
+	model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 }
 
 func (ws *candysocket) addRX(size int) {
 	ws.dev.mutex.Lock()
 	defer ws.dev.mutex.Unlock()
 	ws.dev.model.RX += uint64(size)
+	model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 }

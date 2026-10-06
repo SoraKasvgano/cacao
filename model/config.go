@@ -20,17 +20,12 @@ type Config struct {
 	Value string
 }
 
-func (c *Config) Save() {
-	db := storage.Get()
-	db.Save(c)
+func (c *Config) Save() error {
+	return SetConfig(c.Key, c.Value)
 }
 
-func SetConfig(key string, value string) {
-	db := storage.Get()
-	config := &Config{Key: key}
-	db.Where(config).Take(config)
-	config.Value = value
-	config.Save()
+func SetConfig(key string, value string) error {
+	return storage.Write(func(tx *gorm.DB) error { return SetConfigTx(tx, key, value) })
 }
 
 func GetConfig(key string, defaultValue string) string {
@@ -42,8 +37,6 @@ func GetConfig(key string, defaultValue string) string {
 	return defaultValue
 }
 
-func DelConfig(key string) {
-	db := storage.Get()
-	config := &Config{Key: key}
-	db.Where(config).Delete(config)
+func DelConfig(key string) error {
+	return storage.Write(func(tx *gorm.DB) error { return tx.Where("key = ?", key).Delete(&Config{}).Error })
 }

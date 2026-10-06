@@ -10,6 +10,10 @@
         <team-outlined />
         <span class="nav-text">{{ $t('components.sider.user') }}</span>
       </a-menu-item>
+      <a-menu-item key="tasks">
+        <schedule-outlined />
+        <span class="nav-text">{{ $t('adminTasks.title') }}</span>
+      </a-menu-item>
       <a-menu-item key="license">
         <copyright-outlined />
         <span class="nav-text">{{ $t('components.sider.license') }}</span>

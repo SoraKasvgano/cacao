@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -72,6 +73,13 @@ func DeviceDelete(c *gin.Context) {
 		return
 	}
 
-	deviceModel.Delete()
+	if err := deviceModel.Delete(); err != nil {
+		if errors.Is(err, model.ErrDeviceOnline) {
+			setErrorCode(c, CannotDeleteOnlineDevice)
+		} else {
+			setErrorCode(c, Unexpected)
+		}
+		return
+	}
 	setResponseData(c, nil)
 }

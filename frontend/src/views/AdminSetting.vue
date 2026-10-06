@@ -147,7 +147,7 @@ const cleanInactiveUser = async () => {
   const response = await axios.post('/api/admin/cleanInactiveUser')
   const status = response.data.status
   if (status == 0) {
-    message.success(t('adminSetting.userClean.success'))
+    message.success(t('adminTasks.queued'))
   }
 }
 </script>
