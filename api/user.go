@@ -1,15 +1,11 @@
 package api
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
@@ -17,15 +13,6 @@ import (
 
 func LoginMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		path := c.Request.URL.String()
-		if !strings.HasPrefix(path, "/api/") {
-			c.Next()
-			return
-		}
-		if path == "/api/user/register" || path == "/api/user/login" {
-			c.Next()
-			return
-		}
 		idstr, errid := c.Cookie("id")
 		token, errtoken := c.Cookie("token")
 		if errid != nil || errtoken != nil || len(idstr) == 0 || len(token) == 0 {
@@ -34,7 +21,7 @@ func LoginMiddleware() gin.HandlerFunc {
 			return
 		}
 		id, err := strconv.ParseUint(idstr, 10, 64)
-		if err != nil {
+		if err != nil || id == 0 || uint64(uint(id)) != id || len(token) > 128 {
 			setErrorCode(c, NotLoggedIn)
 			c.Abort()
 			return
@@ -43,11 +30,30 @@ func LoginMiddleware() gin.HandlerFunc {
 		user.ID = uint(id)
 
 		db := storage.Get()
-		result := db.Where(user).Take(user)
-		if result.Error != nil || user.Token != token {
+		result := db.Where("id = ?", id).Take(user)
+		if result.Error != nil || !validSessionToken(user.Token, token) || user.TokenExpiresAt == nil || !time.Now().Before(*user.TokenExpiresAt) {
 			setErrorCode(c, NotLoggedIn)
 			c.Abort()
 			return
+		}
+		if !strings.HasPrefix(user.Token, "sha256:") {
+			// Upgrade stored legacy tokens without changing the browser cookie.
+			result := db.Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).UpdateColumn("token", hashSessionToken(token))
+			if result.Error != nil {
+				setErrorCode(c, Unexpected)
+				c.Abort()
+				return
+			}
+			if result.RowsAffected == 0 {
+				// Another request may have migrated or revoked this session.
+				if db.Where("id = ?", id).Take(user).Error != nil || !validSessionToken(user.Token, token) || user.TokenExpiresAt == nil || !time.Now().Before(*user.TokenExpiresAt) {
+					setErrorCode(c, NotLoggedIn)
+					c.Abort()
+					return
+				}
+			} else {
+				user.Token = hashSessionToken(token)
+			}
 		}
 		c.Set("user", user)
 		c.Next()
@@ -74,17 +80,35 @@ func UserStatistics(c *gin.Context) {
 }
 
 func UserRegister(c *gin.Context) {
-	if model.GetConfig("openreg", "true") != "true" {
-		setErrorCode(c, RegistrationDisabled)
-		return
-	}
-
 	var request struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		SetupToken string `json:"setupToken"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		setErrorCode(c, InvalidRequest)
+		return
+	}
+	if !allowAuthentication(c, request.Username) {
+		return
+	}
+	registrationMu.Lock()
+	defer registrationMu.Unlock()
+	db := storage.Get()
+	var count int64
+	if err := db.Unscoped().Model(&model.User{}).Count(&count).Error; err != nil {
+		setErrorCode(c, Unexpected)
+		return
+	}
+	initialSetup := count == 0
+	if initialSetup {
+		if !validSetupToken(request.SetupToken) {
+			recordAuthenticationFailure(c, request.Username)
+			setErrorCode(c, SetupRequired)
+			return
+		}
+	} else if model.GetConfig("openreg", "false") != "true" {
+		setErrorCode(c, RegistrationDisabled)
 		return
 	}
 	if request.Username == "@" {
@@ -100,7 +124,6 @@ func UserRegister(c *gin.Context) {
 		return
 	}
 
-	db := storage.Get()
 	if func() bool {
 		count := int64(0)
 		db.Model(&model.User{}).Where(&model.User{IP: c.ClientIP(), Role: "normal"}).Where("created_at > ?", time.Now().Add(-1*registerInterval())).Count(&count)
@@ -119,30 +142,25 @@ func UserRegister(c *gin.Context) {
 		return
 	}
 
-	role := func() string {
-		count := int64(0)
-		db.Model(&model.User{}).Count(&count)
-		if count == 0 {
-			return "admin"
-		}
-		return "normal"
-	}()
+	role := "normal"
+	if initialSetup {
+		role = "admin"
+	}
 
 	user := model.User{
 		Name:     request.Username,
 		Password: hashUserPassword(request.Username, request.Password),
-		Token:    uuid.NewString(),
 		Role:     role,
 		IP:       c.ClientIP(),
 	}
+	token := newSession(&user)
 
 	if result := db.Create(&user); result.Error != nil {
 		setUnexpectedMessage(c, result.Error.Error())
 		return
 	}
 
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, gin.H{
 		"name": user.Name,
@@ -176,14 +194,24 @@ func UserLogin(c *gin.Context) {
 		return
 	}
 
-	user := model.User{
-		Name:     request.Username,
-		Password: hashUserPassword(request.Username, request.Password),
+	if !allowAuthentication(c, request.Username) {
+		return
 	}
+	if !candy.IsValidUsername(request.Username) || request.Password == "" {
+		recordAuthenticationFailure(c, request.Username)
+		setErrorCode(c, IncorrectUsernameOrPassword)
+		return
+	}
+	user := model.User{}
+	if !acquirePasswordWork(c) {
+		return
+	}
+	defer func() { <-passwordWork }()
 
 	db := storage.Get()
 
-	if result := db.Where(user).Take(&user); result.Error != nil {
+	if result := db.Where("name = ?", request.Username).Take(&user); result.Error != nil || !verifyUserPassword(&user, request.Password) {
+		recordAuthenticationFailure(c, request.Username)
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -192,11 +220,19 @@ func UserLogin(c *gin.Context) {
 		user.IP = c.ClientIP()
 	}
 
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	previousPassword := user.Password
+	if !strings.HasPrefix(user.Password, "bcrypt-sha256:") {
+		user.Password = hashUserPassword(user.Name, request.Password)
+	}
+	token := newSession(&user)
+	result := db.Model(&model.User{}).Where("id = ? AND password = ?", user.ID, previousPassword).Updates(map[string]interface{}{
+		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt, "ip": user.IP,
+	})
+	if result.Error != nil || result.RowsAffected != 1 {
+		setErrorCode(c, IncorrectUsernameOrPassword)
+		return
+	}
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, gin.H{
 		"name": user.Name,
@@ -206,11 +242,12 @@ func UserLogin(c *gin.Context) {
 
 func UserLogout(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", "", -1, "/", "", false, true)
-	c.SetCookie("token", "", -1, "/", "", false, true)
+	result := storage.Get().Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).Updates(map[string]interface{}{"token": "", "token_expires_at": nil})
+	if result.Error != nil {
+		setErrorCode(c, Unexpected)
+		return
+	}
+	setSessionCookies(c, 0, "", -1)
 
 	setResponseData(c, nil)
 }
@@ -227,8 +264,15 @@ func ChangePassword(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
-
-	if user.Password != hashUserPassword(user.Name, request.OldPassword) {
+	if !allowAuthentication(c, user.Name) {
+		return
+	}
+	if !acquirePasswordWork(c) {
+		return
+	}
+	defer func() { <-passwordWork }()
+	if !verifyUserPassword(user, request.OldPassword) {
+		recordAuthenticationFailure(c, user.Name)
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -237,12 +281,17 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
+	previousPassword, previousToken := user.Password, user.Token
 	user.Password = hashUserPassword(user.Name, request.NewPassword)
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	token := newSession(user)
+	result := storage.Get().Model(&model.User{}).Where("id = ? AND password = ? AND token = ?", user.ID, previousPassword, previousToken).Updates(map[string]interface{}{
+		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt,
+	})
+	if result.Error != nil || result.RowsAffected != 1 {
+		setErrorCode(c, NotLoggedIn)
+		return
+	}
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, nil)
 }
@@ -254,19 +303,4 @@ func registerInterval() time.Duration {
 		interval = 1440
 	}
 	return time.Duration(interval) * time.Minute
-}
-
-func hashUserPassword(username, password string) string {
-	hash := sha256.Sum256([]byte(username + ":" + password))
-	return fmt.Sprintf("%x", hash[:])
-}
-
-func randomString(n int) string {
-	letters := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[r.Intn(len(letters))]
-	}
-	return string(b)
 }

@@ -23,6 +23,11 @@ func CleanInactiveUser() {
 	users := model.GetUsers()
 	for _, u := range users {
 		if u.Role == "normal" && model.GetLastActiveTimeByUserID(u.ID).AddDate(0, 0, threshold).Before(time.Now()) {
+			for _, n := range model.GetNetsByUserID(u.ID) {
+				DeleteNet(n.ID)
+				model.DeleteDevicesByNetID(n.ID)
+				n.Delete()
+			}
 			u.Delete()
 		}
 	}

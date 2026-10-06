@@ -14,15 +14,20 @@ func init() {
 	if err != nil {
 		logger.Fatal("auto migrate users failed: %v", err)
 	}
+	// Give existing sessions a one-time grace period when upgrading.
+	if err := db.Model(&User{}).Where("token <> ? AND token_expires_at IS NULL", "").UpdateColumn("token_expires_at", time.Now().Add(24*time.Hour)).Error; err != nil {
+		logger.Fatal("migrate session expiry failed: %v", err)
+	}
 }
 
 type User struct {
 	gorm.Model
-	Name     string `gorm:"index"`
-	Password string
-	Token    string
-	Role     string
-	IP       string
+	Name           string `gorm:"index"`
+	Password       string
+	Token          string
+	TokenExpiresAt *time.Time
+	Role           string
+	IP             string
 }
 
 func (u *User) Save() {
@@ -60,10 +65,7 @@ func GetLastActiveTimeByUserID(userid uint) time.Time {
 func RefreshUserLastActiveTimeByUserID(userid uint) {
 	if userid != 0 {
 		db := storage.Get()
-		u := &User{Model: gorm.Model{ID: userid}}
-		if result := db.Model(u).Take(&u); result.Error == nil {
-			u.UpdatedAt = time.Now()
-			u.Save()
-		}
+		// Updating activity must never restore a concurrently revoked session.
+		db.Model(&User{}).Where("id = ?", userid).UpdateColumn("updated_at", time.Now())
 	}
 }

@@ -30,6 +30,8 @@ func init() {
 	statusMessage[DeviceNotExists] = "device not exists"
 	statusMessage[CannotDeleteOnlineDevice] = "cannot delete online device"
 	statusMessage[InvalidInactiveUserThreshold] = "invalid inactive user threshold"
+	statusMessage[SetupRequired] = "initial setup requires a valid setup token"
+	statusMessage[TooManyRequests] = "too many authentication attempts"
 }
 
 const (
@@ -55,6 +57,8 @@ const (
 	DeviceNotExists
 	CannotDeleteOnlineDevice
 	InvalidInactiveUserThreshold
+	SetupRequired
+	TooManyRequests
 )
 
 var statusMessage map[int]string
@@ -72,7 +76,7 @@ func setErrorCode(c *gin.Context, code int) {
 }
 
 func setUnexpectedMessage(c *gin.Context, msg string) {
-	setResponse(c, Unexpected, msg, nil)
+	setErrorCode(c, Unexpected)
 }
 
 func setResponseData(c *gin.Context, data gin.H) {

@@ -60,16 +60,15 @@ func DeviceDelete(c *gin.Context) {
 	}
 
 	deviceModel := model.GetDeviceByDevID(request.DevID)
-	if deviceModel.Online {
-		setErrorCode(c, CannotDeleteOnlineDevice)
-		return
-	}
-
 	netModel := model.GetNetByNetID(deviceModel.NetID)
 
 	user := c.MustGet("user").(*model.User)
 	if user.ID != netModel.UserID {
 		setErrorCode(c, DeviceNotExists)
+		return
+	}
+	if deviceModel.Online {
+		setErrorCode(c, CannotDeleteOnlineDevice)
 		return
 	}
 

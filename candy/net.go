@@ -2,6 +2,7 @@ package candy
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
@@ -32,6 +33,9 @@ type Net struct {
 	model        *model.Net
 	ipWsMap      map[uint32]*candysocket
 	ipWsMapMutex sync.RWMutex
+	connections  map[*candysocket]struct{}
+	closed       bool
+	dhcpMutex    sync.Mutex
 
 	net  uint32
 	host uint32
@@ -49,14 +53,16 @@ func flush() {
 
 	for _, n := range idNetMap {
 		n.ipWsMapMutex.RLock()
-		defer n.ipWsMapMutex.RUnlock()
 		hasDeviceOnline := false
 		for _, ws := range n.ipWsMap {
+			ws.dev.mutex.Lock()
 			if ws.dev.model.Online {
 				hasDeviceOnline = true
 				ws.dev.model.SaveRxTxOnline()
 			}
+			ws.dev.mutex.Unlock()
 		}
+		n.ipWsMapMutex.RUnlock()
 		if hasDeviceOnline && !refreshedUsers.ContainsOne(n.model.UserID) {
 			model.RefreshUserLastActiveTimeByUserID(n.model.UserID)
 			refreshedUsers.Add(n.model.UserID)
@@ -85,6 +91,9 @@ func (n *Net) ipConflict(ip, vmac string) bool {
 }
 
 func (n *Net) checkAuthMessage(message *AuthMessage) error {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
 	reported := message.Hash
 
 	var data []byte
@@ -92,27 +101,35 @@ func (n *Net) checkAuthMessage(message *AuthMessage) error {
 	data = binary.BigEndian.AppendUint32(data, message.IP)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("auth check failed: hash does not match")
 	}
 	return nil
 }
 
 func (n *Net) checkDHCPMessage(message *DHCPMessage) error {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
 	reported := message.Hash
 
 	var data []byte
 	data = append(data, n.model.Password...)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("dhcp check failed: hash does not match")
 	}
 	return nil
 }
 
 func (n *Net) checkVMacMessage(message *VMacMessage) error {
-	if _, err := strconv.ParseUint(message.VMac, 16, 64); err != nil {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
+	if _, err := strconv.ParseUint(message.VMac, 16, 64); len(message.VMac) != 16 || err != nil {
 		return fmt.Errorf("vmac check failed: invalid vmac")
 	}
 
@@ -123,7 +140,8 @@ func (n *Net) checkVMacMessage(message *VMacMessage) error {
 	data = append(data, message.VMac...)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("vmac check failed: hash does not match")
 	}
 	return nil
@@ -136,19 +154,38 @@ func (n *Net) updateHost() string {
 	return uint32ToStrIp(n.net | n.host)
 }
 
+func checkMessageTimestamp(timestamp int64) error {
+	// Candy clients use Unix seconds. Compare bounds instead of subtracting
+	// untrusted int64 values, which could overflow.
+	now := time.Now().Unix()
+	if timestamp < now-300 || timestamp > now+300 {
+		return fmt.Errorf("authentication timestamp outside the five-minute window")
+	}
+	return nil
+}
+
 func (n *Net) close() {
 	n.ipWsMapMutex.Lock()
 	defer n.ipWsMapMutex.Unlock()
-	for ip, ws := range n.ipWsMap {
-		ws.writeCloseMessage("net close")
+	n.closed = true
+	// Include connections that have not finished authentication. Otherwise a
+	// connection could authenticate with the old password after a rotation.
+	for ws := range n.connections {
+		ws.authenticated.Store(false)
 		ws.conn.Close()
+	}
+	for ip, ws := range n.ipWsMap {
+		ws.dev.mutex.Lock()
+		ws.dev.model.Online = false
+		ws.dev.model.SaveRxTxOnline()
+		ws.dev.mutex.Unlock()
 		delete(n.ipWsMap, ip)
 	}
 }
 
 func IsInvalidDHCP(cidr string) bool {
 	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
+	if err != nil || ipNet.IP.To4() == nil || len(ipNet.Mask) != net.IPv4len {
 		return true
 	}
 	mask := binary.BigEndian.Uint32(ipNet.Mask)
@@ -158,7 +195,10 @@ func IsInvalidDHCP(cidr string) bool {
 func InsertNet(netModel *model.Net) {
 	idNetMapMutex.Lock()
 	defer idNetMapMutex.Unlock()
+	insertNetLocked(netModel)
+}
 
+func insertNetLocked(netModel *model.Net) {
 	if IsInvalidDHCP(netModel.DHCP) {
 		logger.Fatal("invalid net cidr: %v", netModel.DHCP)
 		return
@@ -170,19 +210,24 @@ func InsertNet(netModel *model.Net) {
 	hostid := rand.Uint32() & ^mask
 
 	net := &Net{
-		model:   netModel,
-		ipWsMap: make(map[uint32]*candysocket),
-		net:     netid,
-		host:    hostid,
-		mask:    mask,
+		model:       netModel,
+		ipWsMap:     make(map[uint32]*candysocket),
+		connections: make(map[*candysocket]struct{}),
+		net:         netid,
+		host:        hostid,
+		mask:        mask,
 	}
 	net.updateHost()
 	idNetMap[netModel.ID] = net
 }
 
 func UpdateNet(netModel *model.Net) {
-	DeleteNet(netModel.ID)
-	InsertNet(netModel)
+	idNetMapMutex.Lock()
+	defer idNetMapMutex.Unlock()
+	if n := idNetMap[netModel.ID]; n != nil {
+		n.close()
+	}
+	insertNetLocked(netModel)
 }
 
 func DeleteNet(netid uint) {
@@ -199,9 +244,9 @@ func DeleteNet(netid uint) {
 func ReloadNet(netid uint) {
 	idNetMapMutex.Lock()
 	defer idNetMapMutex.Unlock()
-
-	if net, ok := idNetMap[netid]; ok {
-		net.close()
+	if n := idNetMap[netid]; n != nil {
+		n.close()
+		insertNetLocked(n.model)
 	}
 }
 
@@ -220,7 +265,13 @@ func getNetByPath(path string) *Net {
 	netname := "@"
 
 	result := strings.Split(strings.Trim(path, "/"), "/")
-	if IsValidUsername(result[0]) {
+	if len(result) > 2 {
+		return nil
+	}
+	if result[0] != "" {
+		if !IsValidUsername(result[0]) {
+			return nil
+		}
 		username = result[0]
 	}
 	if len(result) > 1 {
