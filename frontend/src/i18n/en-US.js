@@ -10,6 +10,9 @@ export default {
         or: 'Or'
     },
     register: {
+        setupToken: 'Initial setup key (optional)',
+        setupTokenPlaceholder: 'Required for the first administrator',
+        setupTokenHelp: 'Only needed to create the first administrator. Ask the operator for this key. Leave blank for ordinary registration on an existing site.',
         username: 'Username',
         password: 'Password',
         register: 'Register',
@@ -18,6 +21,9 @@ export default {
     },
     loading: {
         title: 'Loading'
+    },
+    security: {
+        requestFailed: 'Request failed. Please try again later.'
     },
     user: {
         title: 'User',

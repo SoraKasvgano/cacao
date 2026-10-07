@@ -74,6 +74,8 @@ func AdminShowUsers(c *gin.Context) {
 }
 
 func AdminAddUser(c *gin.Context) {
+	registrationMu.Lock()
+	defer registrationMu.Unlock()
 	var request struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -188,7 +190,7 @@ func AdminUpdateUserPassword(c *gin.Context) {
 }
 
 func AdminGetOpenRegisterConfig(c *gin.Context) {
-	openreg := model.GetConfig("openreg", "true") == "true"
+	openreg := model.GetConfig("openreg", "false") == "true"
 	setResponseData(c, gin.H{
 		"openreg": openreg,
 	})
