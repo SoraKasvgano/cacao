@@ -81,7 +81,7 @@ func GetDevicesByNetID(netid uint) (devices []Device) {
 func GetDevicesByUserID(userid uint) (devices []Device) {
 	if userid != 0 {
 		db := storage.Get()
-		db.Model(&Device{}).Joins("left join nets on devices.net_id = nets.id").Where("nets.user_id = ?", userid).Find(&devices)
+		db.Model(&Device{}).Joins("join nets on devices.net_id = nets.id AND nets.deleted_at IS NULL").Where("nets.user_id = ?", userid).Find(&devices)
 	}
 	return
 }

@@ -46,7 +46,7 @@ func GetRouteByRouteID(routeid uint) (route Route) {
 func GetRoutesByUserID(userid uint) (routes []Route) {
 	if userid != 0 {
 		db := storage.Get()
-		db.Model(&Route{}).Joins("left join nets on routes.net_id = nets.id").Where("nets.user_id = ?", userid).Order("routes.net_id,routes.priority").Find(&routes)
+		db.Model(&Route{}).Joins("join nets on routes.net_id = nets.id AND nets.deleted_at IS NULL").Where("nets.user_id = ?", userid).Order("routes.net_id,routes.priority").Find(&routes)
 	}
 	return
 }

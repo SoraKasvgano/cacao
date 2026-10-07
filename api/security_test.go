@@ -259,3 +259,35 @@ func TestCookiesSecureWithTLS(t *testing.T) {
 		}
 	}
 }
+
+func TestCrossTenantAndZeroIDMutations(t *testing.T) {
+	r := securityRouter()
+	owner, _ := testUser(t, "normal")
+	_, cookies := testUser(t, "normal")
+	network := model.Net{UserID: owner.ID, Name: "test-net"}
+	storage.Get().Create(&network)
+	t.Cleanup(func() { storage.Get().Unscoped().Delete(&network) })
+	device := model.Device{NetID: network.ID, Online: true}
+	storage.Get().Create(&device)
+	t.Cleanup(func() { storage.Get().Unscoped().Delete(&device) })
+	route := model.Route{NetID: network.ID}
+	storage.Get().Create(&route)
+	t.Cleanup(func() { storage.Get().Unscoped().Delete(&route) })
+	for _, item := range []struct {
+		path, body string
+		status     int
+	}{
+		{"/api/net/delete", fmt.Sprintf(`{"netid":%d}`, network.ID), NetworkNotExists},
+		{"/api/net/delete", `{"netid":0}`, NetworkNotExists},
+		{"/api/device/delete", fmt.Sprintf(`{"devid":%d}`, device.ID), DeviceNotExists},
+		{"/api/route/delete", fmt.Sprintf(`{"routeid":%d}`, route.ID), RouteNotExists},
+	} {
+		if _, status := securityRequest(t, r, item.path, item.body, cookies...); status != item.status {
+			t.Fatalf("%s: got %d want %d", item.path, status, item.status)
+		}
+	}
+	storage.Get().Delete(&network)
+	if model.GetNetByNetID(network.ID).ID != 0 {
+		t.Fatal("deleted network still accessible")
+	}
+}
