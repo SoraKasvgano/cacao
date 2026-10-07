@@ -2,6 +2,7 @@ package candy
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
@@ -85,6 +86,9 @@ func (n *Net) ipConflict(ip, vmac string) bool {
 }
 
 func (n *Net) checkAuthMessage(message *AuthMessage) error {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
 	reported := message.Hash
 
 	var data []byte
@@ -92,27 +96,35 @@ func (n *Net) checkAuthMessage(message *AuthMessage) error {
 	data = binary.BigEndian.AppendUint32(data, message.IP)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("auth check failed: hash does not match")
 	}
 	return nil
 }
 
 func (n *Net) checkDHCPMessage(message *DHCPMessage) error {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
 	reported := message.Hash
 
 	var data []byte
 	data = append(data, n.model.Password...)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("dhcp check failed: hash does not match")
 	}
 	return nil
 }
 
 func (n *Net) checkVMacMessage(message *VMacMessage) error {
-	if _, err := strconv.ParseUint(message.VMac, 16, 64); err != nil {
+	if err := checkMessageTimestamp(message.Timestamp); err != nil {
+		return err
+	}
+	if _, err := strconv.ParseUint(message.VMac, 16, 64); len(message.VMac) != 16 || err != nil {
 		return fmt.Errorf("vmac check failed: invalid vmac")
 	}
 
@@ -123,7 +135,8 @@ func (n *Net) checkVMacMessage(message *VMacMessage) error {
 	data = append(data, message.VMac...)
 	data = binary.BigEndian.AppendUint64(data, uint64(message.Timestamp))
 
-	if sha256.Sum256([]byte(data)) != reported {
+	expected := sha256.Sum256(data)
+	if subtle.ConstantTimeCompare(expected[:], reported[:]) != 1 {
 		return fmt.Errorf("vmac check failed: hash does not match")
 	}
 	return nil
@@ -263,4 +276,14 @@ func strIpToUint32(ip string) uint32 {
 
 	rv := uint32(s[0]<<24 | s[1]<<16 | s[2]<<8 | s[3])
 	return rv
+}
+
+func checkMessageTimestamp(timestamp int64) error {
+	// Candy clients use Unix seconds. Compare bounds instead of subtracting
+	// untrusted int64 values, which could overflow.
+	now := time.Now().Unix()
+	if timestamp < now-300 || timestamp > now+300 {
+		return fmt.Errorf("authentication timestamp outside the five-minute window")
+	}
+	return nil
 }
