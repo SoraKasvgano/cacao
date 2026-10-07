@@ -68,6 +68,11 @@ func testUser(t *testing.T, role string) (model.User, []*http.Cookie) {
 	return u, []*http.Cookie{{Name: "id", Value: fmt.Sprint(u.ID)}, {Name: "token", Value: token}}
 }
 
+func resetAuthAttempts(t *testing.T) {
+	t.Helper()
+	authAttempts = &attemptLimiter{entries: make(map[string]attemptWindow)}
+}
+
 func TestSessionAuthorization(t *testing.T) {
 	r := securityRouter()
 	u, cookies := testUser(t, "normal")
@@ -115,11 +120,15 @@ func TestLegacySessionUpgradeAndLogout(t *testing.T) {
 }
 
 func TestLegacyPasswordUpgradeAndRevocation(t *testing.T) {
+	resetAuthAttempts(t)
 	r := securityRouter()
 	u, oldCookies := testUser(t, "normal")
 	w, status := securityRequest(t, r, "/api/user/login", fmt.Sprintf(`{"username":%q,"password":"old-password"}`, u.Name))
 	if status != Success {
 		t.Fatalf("legacy login failed: %d", status)
+	}
+	if len(authAttempts.entries) != 0 {
+		t.Fatal("successful login consumed the failed-authentication budget")
 	}
 	storage.Get().First(&u, u.ID)
 	if !strings.HasPrefix(u.Password, "bcrypt-sha256:") || !verifyUserPassword(&u, "old-password") {
@@ -150,6 +159,7 @@ func TestLegacyPasswordUpgradeAndRevocation(t *testing.T) {
 }
 
 func TestPasswordChangeForAdminAndLongPasswords(t *testing.T) {
+	resetAuthAttempts(t)
 	r := securityRouter()
 	u, cookies := testUser(t, "admin")
 	password := strings.Repeat("long-password", 20)
@@ -169,7 +179,32 @@ func TestPasswordChangeForAdminAndLongPasswords(t *testing.T) {
 	}
 }
 
+func TestAuthenticationRateLimit(t *testing.T) {
+	resetAuthAttempts(t)
+	r := securityRouter()
+	for i := 0; i < 30; i++ {
+		_, status := securityRequest(t, r, "/api/user/login", `{"username":"missing-user","password":"wrong"}`)
+		if status != IncorrectUsernameOrPassword {
+			t.Fatalf("attempt %d: %d", i, status)
+		}
+	}
+	w, status := securityRequest(t, r, "/api/user/login", `{"username":"missing-user","password":"wrong"}`)
+	if w.Code != http.StatusTooManyRequests || status != TooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatal("brute force not throttled")
+	}
+	_, cookies := testUser(t, "normal")
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", cookies...); status != Success {
+		t.Fatal("authentication limiter disrupted business API")
+	}
+	now := time.Now()
+	l := &attemptLimiter{entries: map[string]attemptWindow{}}
+	if !l.allow("a", 1, time.Minute, now) || l.allow("a", 1, time.Minute, now) || !l.allow("a", 1, time.Minute, now.Add(time.Minute)) {
+		t.Fatal("limiter expiry failed")
+	}
+}
+
 func TestSetupRequiresSecret(t *testing.T) {
+	resetAuthAttempts(t)
 	t.Setenv("CACAO_SETUP_TOKEN", "")
 	if validSetupToken("") {
 		t.Fatal("unconfigured setup accepted")
