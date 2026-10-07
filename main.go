@@ -18,6 +18,7 @@ import (
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/frontend"
 	"github.com/lanthora/cacao/logger"
+	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/util"
 )
 
@@ -26,6 +27,9 @@ func init() {
 }
 
 func main() {
+	if err := model.EnsureIntegrity(); err != nil {
+		logger.Fatal("install database integrity failed: %v", err)
+	}
 	r, err := newRouter(argp.Get("trusted-proxies", ""))
 	if err != nil {
 		logger.Fatal("invalid trusted proxies: %v", err)
