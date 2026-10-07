@@ -35,6 +35,7 @@ type Net struct {
 	ipWsMapMutex sync.RWMutex
 	connections  map[*candysocket]struct{}
 	closed       bool
+	dhcpMutex    sync.Mutex
 
 	net  uint32
 	host uint32
@@ -184,7 +185,7 @@ func (n *Net) close() {
 
 func IsInvalidDHCP(cidr string) bool {
 	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
+	if err != nil || ipNet.IP.To4() == nil || len(ipNet.Mask) != net.IPv4len {
 		return true
 	}
 	mask := binary.BigEndian.Uint32(ipNet.Mask)

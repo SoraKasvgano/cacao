@@ -262,6 +262,22 @@ func TestAuthenticatedForwardingAndIdentityImmutability(t *testing.T) {
 	}
 }
 
+func TestDHCPWithoutNullTerminator(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	conn := dialTestWebsocket(t, url)
+	sendVMac(t, conn, n, "0123456789abcdef")
+	message := &DHCPMessage{Type: DHCP, Timestamp: time.Now().Unix(), Cidr: bytes.Repeat([]byte{'x'}, 32)}
+	conn.WriteMessage(websocket.BinaryMessage, signedMessage(t, n.model.Password, message))
+	_, reply, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response DHCPMessage
+	if err := struc.Unpack(bytes.NewReader(reply), &response); err != nil || !bytes.HasPrefix(response.Cidr, []byte("10.20.0.")) {
+		t.Fatalf("DHCP allocation failed: %q, %v", response.Cidr, err)
+	}
+}
+
 func TestNetworkRevocationClosesPendingAuthentication(t *testing.T) {
 	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
 	conn := dialTestWebsocket(t, url)
@@ -312,6 +328,23 @@ func TestReconnectDoesNotLoseReplacementConnection(t *testing.T) {
 	}
 }
 
+func TestExhaustedDHCPTerminates(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/30")
+	for i := 1; i <= 2; i++ {
+		device := &model.Device{NetID: n.model.ID, VMac: fmt.Sprintf("%016x", i), IP: fmt.Sprintf("10.20.0.%d", i)}
+		if err := storage.Get().Create(device).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn := dialTestWebsocket(t, url)
+	sendVMac(t, conn, n, "0123456789abcdef")
+	message := &DHCPMessage{Type: DHCP, Timestamp: time.Now().Unix(), Cidr: make([]byte, 32)}
+	conn.WriteMessage(websocket.BinaryMessage, signedMessage(t, n.model.Password, message))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("exhausted DHCP unexpectedly allocated an address")
+	}
+}
+
 func TestUnauthenticatedPingCannotExtendDeadline(t *testing.T) {
 	finished := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -340,5 +373,16 @@ func TestUnauthenticatedPingCannotExtendDeadline(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("unauthenticated ping extended the authentication deadline")
+	}
+}
+
+func TestDHCPRejectsUnsupportedSubnets(t *testing.T) {
+	for _, cidr := range []string{"::/0", "2001:db8::/64", "10.0.0.0/31", "10.0.0.1/32", "invalid"} {
+		if !IsInvalidDHCP(cidr) {
+			t.Errorf("unsupported DHCP subnet accepted: %s", cidr)
+		}
+	}
+	if IsInvalidDHCP("10.0.0.0/24") {
+		t.Fatal("existing IPv4 subnet rejected")
 	}
 }
