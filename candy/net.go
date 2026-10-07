@@ -233,7 +233,13 @@ func getNetByPath(path string) *Net {
 	netname := "@"
 
 	result := strings.Split(strings.Trim(path, "/"), "/")
-	if IsValidUsername(result[0]) {
+	if len(result) > 2 {
+		return nil
+	}
+	if result[0] != "" {
+		if !IsValidUsername(result[0]) {
+			return nil
+		}
 		username = result[0]
 	}
 	if len(result) > 1 {
