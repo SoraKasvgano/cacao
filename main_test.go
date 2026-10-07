@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -177,6 +178,16 @@ func TestSecurityHeadersAndUnknownAPI(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatal("untrusted forwarded scheme must not enable HSTS")
+	}
+}
+
+func TestHTTPServerLimits(t *testing.T) {
+	server := newHTTPServer(":80", http.NotFoundHandler())
+	if server.ReadHeaderTimeout <= 0 || server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 || server.MaxHeaderBytes <= 0 {
+		t.Fatal("HTTP server is missing resource limits")
+	}
+	if server.TLSConfig == nil || server.TLSConfig.MinVersion < tls.VersionTLS12 {
+		t.Fatal("TLS 1.2 or newer is required")
 	}
 }
 
