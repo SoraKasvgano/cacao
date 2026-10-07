@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -60,9 +64,9 @@ func newRouter(trustedProxies string) (*gin.Engine, error) {
 		logger.Info("http handler panic: method=%s path=%s", c.Request.Method, c.FullPath())
 		c.AbortWithStatus(http.StatusInternalServerError)
 	})
-	r.Use(recovery, candy.WebsocketMiddleware())
+	r.Use(recovery, securityHeaders(), candy.WebsocketMiddleware())
 
-	public := r.Group("/api")
+	public := r.Group("/api", apiRequestSecurity())
 	public.POST("/user/register", api.UserRegister)
 	public.POST("/user/login", api.UserLogin)
 	protected := public.Group("", api.LoginMiddleware(), api.AdminMiddleware())
@@ -111,4 +115,78 @@ func newRouter(trustedProxies string) (*gin.Engine, error) {
 		frontend.Static(c)
 	})
 	return r, nil
+}
+
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		if c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000")
+		}
+		c.Next()
+	}
+}
+
+const maxAPIRequestBytes = 1 << 20
+
+func apiRequestSecurity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		if strings.EqualFold(c.GetHeader("Sec-Fetch-Site"), "cross-site") {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		if origin := c.GetHeader("Origin"); origin != "" && !sameOriginHost(origin, c.Request.Host) {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		if c.Request.ContentLength > maxAPIRequestBytes {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return
+		}
+		if c.Request.Body != nil {
+			body := http.MaxBytesReader(c.Writer, c.Request.Body, maxAPIRequestBytes)
+			data, err := io.ReadAll(body)
+			body.Close()
+			if err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+				} else {
+					c.AbortWithStatus(http.StatusBadRequest)
+				}
+				return
+			}
+			// Existing read-only calls and logout use an empty axios POST body.
+			if len(data) != 0 {
+				contentType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+				if err != nil || contentType != "application/json" {
+					c.AbortWithStatus(http.StatusUnsupportedMediaType)
+					return
+				}
+			}
+			c.Request.Body = io.NopCloser(bytes.NewReader(data))
+		}
+		c.Next()
+	}
+}
+
+func sameOriginHost(origin, host string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	// Compare against the preserved Host header, including behind TLS termination.
+	// Scheme cannot be inferred from untrusted X-Forwarded-Proto headers.
+	defaultPort := ":80"
+	if parsed.Scheme == "https" {
+		defaultPort = ":443"
+	}
+	originHost := strings.TrimSuffix(strings.ToLower(parsed.Host), defaultPort)
+	requestHost := strings.TrimSuffix(strings.ToLower(host), defaultPort)
+	return originHost == requestHost
 }
