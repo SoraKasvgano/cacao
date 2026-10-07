@@ -19,9 +19,21 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	maxWebsocketMessageSize = 65536 // Type byte plus the largest IPv4 packet.
+	websocketAuthTimeout    = 15 * time.Second
+	websocketWriteTimeout   = 10 * time.Second
+)
+
 func WebsocketMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.GetHeader("Upgrade") == "websocket" {
+		path := c.Request.URL.Path
+		apiRoute := c.FullPath() == "/api" || strings.HasPrefix(c.FullPath(), "/api/")
+		// Candy paths contain at most a username and network name. Preserve
+		// networks owned by the valid username "api", while HTTP API routes
+		// always keep their own authentication middleware.
+		apiPath := strings.HasPrefix(path, "/api/") && strings.Count(strings.Trim(path, "/"), "/") >= 2
+		if !apiRoute && !apiPath && websocket.IsWebSocketUpgrade(c.Request) {
 			handleWebsocket(c)
 			c.Abort()
 		} else {
@@ -31,8 +43,13 @@ func WebsocketMiddleware() gin.HandlerFunc {
 }
 
 func handleWebsocket(c *gin.Context) {
+	net := getNetByPath(c.Request.URL.Path)
+	if net == nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
+		HandshakeTimeout: websocketAuthTimeout,
 	}
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -40,39 +57,23 @@ func handleWebsocket(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
-	net := getNetByPath(c.Request.URL.Path)
-	if net == nil {
-		logger.Debug("net not found: %v", c.Request.URL.Path)
-		return
-	}
+	conn.SetReadLimit(maxWebsocketMessageSize)
 	ws := &candysocket{ctx: c, conn: conn, net: net}
 	conn.SetPingHandler(func(buffer string) error { return ws.handlePingMessage(buffer) })
 
 	for {
-		ws.updateReadDeadline()
+		if err := ws.updateReadDeadline(); err != nil {
+			break
+		}
 		messageType, buffer, err := conn.ReadMessage()
 		if err != nil {
 			logger.Debug("read websocket failed: %v", err)
 			break
 		}
 		if messageType != websocket.BinaryMessage {
-			continue
-		}
-		switch uint8(buffer[0]) {
-		case AUTH:
-			err = ws.handleAuthMessage(buffer)
-		case FORWARD:
-			err = ws.handleForwardMessage(buffer)
-		case DHCP:
-			err = ws.handleDHCPMessage(buffer)
-		case PEER:
-			err = ws.handlePeerConnMessage(buffer)
-		case VMAC:
-			err = ws.handleVMacMessage(buffer)
-		case DISCOVERY:
-			err = ws.handleDiscoveryMessage(buffer)
-		case GENERAL:
-			err = ws.handleGeneralMessage(buffer)
+			err = fmt.Errorf("only binary messages are supported")
+		} else {
+			err = ws.handleMessage(buffer)
 		}
 		if err != nil {
 			logger.Debug("handle client message failed: %v", err)
@@ -480,6 +481,9 @@ func (ws *candysocket) updateSystemRoute() {
 	routes := []model.Route{}
 	db.Where(&model.Route{NetID: ws.net.model.ID}).Order("priority").Find(&routes)
 	for _, route := range routes {
+		if header.Size == 255 {
+			break
+		}
 		deviceAddr := strIpToUint32(route.DevAddr)
 		deviceMask := strIpToUint32(route.DevMask)
 		if deviceAddr != deviceMask&ws.dev.ip {
@@ -496,5 +500,29 @@ func (ws *candysocket) updateSystemRoute() {
 		headerBuffer := bytes.Buffer{}
 		struc.Pack(&headerBuffer, header)
 		ws.writeMessage(append(headerBuffer.Bytes(), bodyBuffer.Bytes()...))
+	}
+}
+
+func (ws *candysocket) handleMessage(buffer []byte) error {
+	if len(buffer) == 0 || len(buffer) > maxWebsocketMessageSize {
+		return fmt.Errorf("invalid websocket message size")
+	}
+	switch buffer[0] {
+	case AUTH:
+		return ws.handleAuthMessage(buffer)
+	case FORWARD:
+		return ws.handleForwardMessage(buffer)
+	case DHCP:
+		return ws.handleDHCPMessage(buffer)
+	case PEER:
+		return ws.handlePeerConnMessage(buffer)
+	case VMAC:
+		return ws.handleVMacMessage(buffer)
+	case DISCOVERY:
+		return ws.handleDiscoveryMessage(buffer)
+	case GENERAL:
+		return ws.handleGeneralMessage(buffer)
+	default:
+		return fmt.Errorf("unsupported websocket message type")
 	}
 }
