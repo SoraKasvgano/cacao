@@ -1,10 +1,11 @@
 package candy
 
 import (
-	"crypto/tls"
 	"net"
 	"net/http"
 	"path"
+	"sync"
+	"time"
 
 	"github.com/ipinfo/go/v2/ipinfo"
 	"github.com/ipinfo/go/v2/ipinfo/cache"
@@ -16,7 +17,7 @@ import (
 )
 
 func GetLocation(ip net.IP) (country, region string) {
-	if !ip.IsPrivate() {
+	if ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
 		ok := false
 		if country, region, ok = ipdbLocation(ip); !ok {
 			if country, region, ok = mmdbLocation(ip); !ok {
@@ -28,11 +29,12 @@ func GetLocation(ip net.IP) (country, region string) {
 }
 
 type dummyCacheEngine struct {
+	mutex sync.Mutex
 	cache map[string]interface{}
 }
 
 var dummyCache = ipinfo.NewCache(newDummyCacheEngine())
-var httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+var httpClient = &http.Client{Timeout: 5 * time.Second}
 
 func newDummyCacheEngine() *dummyCacheEngine {
 	return &dummyCacheEngine{
@@ -41,6 +43,8 @@ func newDummyCacheEngine() *dummyCacheEngine {
 }
 
 func (c *dummyCacheEngine) Get(key string) (interface{}, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	if v, ok := c.cache[key]; ok {
 		return v, nil
 	}
@@ -48,6 +52,15 @@ func (c *dummyCacheEngine) Get(key string) (interface{}, error) {
 }
 
 func (c *dummyCacheEngine) Set(key string, value interface{}) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if len(c.cache) >= 4096 {
+		// Bound metadata growth when peers advertise many public addresses.
+		for oldKey := range c.cache {
+			delete(c.cache, oldKey)
+			break
+		}
+	}
 	c.cache[key] = value
 	return nil
 }
