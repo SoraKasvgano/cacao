@@ -89,6 +89,9 @@ func UserRegister(c *gin.Context) {
 		setErrorCode(c, InvalidRequest)
 		return
 	}
+	if !allowAuthentication(c, request.Username) {
+		return
+	}
 	registrationMu.Lock()
 	defer registrationMu.Unlock()
 	db := storage.Get()
@@ -100,6 +103,7 @@ func UserRegister(c *gin.Context) {
 	initialSetup := count == 0
 	if initialSetup {
 		if !validSetupToken(request.SetupToken) {
+			recordAuthenticationFailure(c, request.Username)
 			setErrorCode(c, SetupRequired)
 			return
 		}
@@ -190,15 +194,24 @@ func UserLogin(c *gin.Context) {
 		return
 	}
 
+	if !allowAuthentication(c, request.Username) {
+		return
+	}
 	if !candy.IsValidUsername(request.Username) || request.Password == "" {
+		recordAuthenticationFailure(c, request.Username)
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
 	user := model.User{}
+	if !acquirePasswordWork(c) {
+		return
+	}
+	defer func() { <-passwordWork }()
 
 	db := storage.Get()
 
 	if result := db.Where("name = ?", request.Username).Take(&user); result.Error != nil || !verifyUserPassword(&user, request.Password) {
+		recordAuthenticationFailure(c, request.Username)
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -251,7 +264,15 @@ func ChangePassword(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
+	if !allowAuthentication(c, user.Name) {
+		return
+	}
+	if !acquirePasswordWork(c) {
+		return
+	}
+	defer func() { <-passwordWork }()
 	if !verifyUserPassword(user, request.OldPassword) {
+		recordAuthenticationFailure(c, user.Name)
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
