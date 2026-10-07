@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -44,7 +45,12 @@ func main() {
 
 func newRouter(trustedProxies string) (*gin.Engine, error) {
 	r := gin.New()
-	r.Use(candy.WebsocketMiddleware())
+	// Gin's default panic logger dumps request headers, including session cookies.
+	recovery := gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
+		logger.Info("http handler panic: method=%s path=%s", c.Request.Method, c.FullPath())
+		c.AbortWithStatus(http.StatusInternalServerError)
+	})
+	r.Use(recovery, candy.WebsocketMiddleware())
 
 	public := r.Group("/api")
 	public.POST("/user/register", api.UserRegister)

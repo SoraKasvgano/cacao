@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestEveryPrivateAPIRouteRequiresAuthentication(t *testing.T) {
@@ -35,5 +39,20 @@ func TestEveryPrivateAPIRouteRequiresAuthentication(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no private API routes were checked")
+	}
+}
+
+func TestPanicRecoveryDoesNotExposeDetails(t *testing.T) {
+	router, err := newRouter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router.GET("/panic-test", func(c *gin.Context) { panic("private panic details") })
+	request := httptest.NewRequest(http.MethodGet, "/panic-test", nil)
+	request.Header.Set("Cookie", "token=private-session-token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "private") {
+		t.Fatalf("unexpected panic response: %d %s", response.Code, response.Body.String())
 	}
 }
