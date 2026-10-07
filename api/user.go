@@ -5,13 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"crypto/sha256"
-	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
-	"math/rand"
 )
 
 func LoginMiddleware() gin.HandlerFunc {
@@ -185,14 +182,15 @@ func UserLogin(c *gin.Context) {
 		return
 	}
 
-	user := model.User{
-		Name:     request.Username,
-		Password: hashUserPassword(request.Username, request.Password),
+	if !candy.IsValidUsername(request.Username) || request.Password == "" {
+		setErrorCode(c, IncorrectUsernameOrPassword)
+		return
 	}
+	user := model.User{}
 
 	db := storage.Get()
 
-	if result := db.Where(user).Take(&user); result.Error != nil {
+	if result := db.Where("name = ?", request.Username).Take(&user); result.Error != nil || !verifyUserPassword(&user, request.Password) {
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -202,6 +200,9 @@ func UserLogin(c *gin.Context) {
 	}
 
 	previousPassword := user.Password
+	if !strings.HasPrefix(user.Password, "bcrypt-sha256:") {
+		user.Password = hashUserPassword(user.Name, request.Password)
+	}
 	token := newSession(&user)
 	result := db.Model(&model.User{}).Where("id = ? AND password = ?", user.ID, previousPassword).Updates(map[string]interface{}{
 		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt, "ip": user.IP,
@@ -242,8 +243,7 @@ func ChangePassword(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
-
-	if user.Password != hashUserPassword(user.Name, request.OldPassword) {
+	if !verifyUserPassword(user, request.OldPassword) {
 		setErrorCode(c, IncorrectUsernameOrPassword)
 		return
 	}
@@ -274,19 +274,4 @@ func registerInterval() time.Duration {
 		interval = 1440
 	}
 	return time.Duration(interval) * time.Minute
-}
-
-func hashUserPassword(username, password string) string {
-	hash := sha256.Sum256([]byte(username + ":" + password))
-	return fmt.Sprintf("%x", hash[:])
-}
-
-func randomString(n int) string {
-	letters := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[r.Intn(len(letters))]
-	}
-	return string(b)
 }
