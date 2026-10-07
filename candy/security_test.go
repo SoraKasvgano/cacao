@@ -376,6 +376,39 @@ func TestUnauthenticatedPingCannotExtendDeadline(t *testing.T) {
 	}
 }
 
+func TestWebsocketFailureLimiter(t *testing.T) {
+	limiter := websocketFailureLimiter{entries: make(map[string]websocketFailure)}
+	for i := 0; i < websocketFailureLimit; i++ {
+		if !limiter.allow("192.0.2.1") {
+			t.Fatal("failure allowance exhausted early")
+		}
+		limiter.record("192.0.2.1")
+	}
+	if limiter.allow("192.0.2.1") || !limiter.allow("192.0.2.2") {
+		t.Fatal("failure limit is not isolated by client IP")
+	}
+	limiter.entries["192.0.2.1"] = websocketFailure{count: websocketFailureLimit, expires: time.Now().Add(-time.Second)}
+	if !limiter.allow("192.0.2.1") {
+		t.Fatal("expired failure limit was not released")
+	}
+	for i := 0; i < maxWebsocketFailureEntries+100; i++ {
+		limiter.record(fmt.Sprint(i))
+	}
+	if len(limiter.entries) > maxWebsocketFailureEntries {
+		t.Fatal("failure limiter exceeded its memory bound")
+	}
+	if limiter.allow("new-client") {
+		t.Fatal("a full failure table allowed an untracked client to bypass throttling")
+	}
+	if !limiter.allow("0") {
+		t.Fatal("a full failure table blocked an existing client below its failure limit")
+	}
+	limiter.entries["0"] = websocketFailure{count: 1, expires: time.Now().Add(-time.Second)}
+	if !limiter.allow("new-client") {
+		t.Fatal("expired entries were not released for a new client")
+	}
+}
+
 func TestDHCPRejectsUnsupportedSubnets(t *testing.T) {
 	for _, cidr := range []string{"::/0", "2001:db8::/64", "10.0.0.0/31", "10.0.0.1/32", "invalid"} {
 		if !IsInvalidDHCP(cidr) {

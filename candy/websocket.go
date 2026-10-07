@@ -48,6 +48,11 @@ func handleWebsocket(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 		return
 	}
+	if !websocketFailures.allow(c.ClientIP()) {
+		c.Header("Retry-After", "60")
+		c.Status(http.StatusTooManyRequests)
+		return
+	}
 	upgrader := websocket.Upgrader{
 		HandshakeTimeout: websocketAuthTimeout,
 	}
@@ -84,6 +89,9 @@ func handleWebsocket(c *gin.Context) {
 			err = ws.handleMessage(buffer)
 		}
 		if err != nil {
+			if !ws.authenticated.Load() {
+				websocketFailures.record(c.ClientIP())
+			}
 			logger.Debug("handle client message failed: %v", err)
 			break
 		}
