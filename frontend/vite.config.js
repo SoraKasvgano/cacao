@@ -1,4 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
+import process from 'node:process'
 
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
@@ -25,9 +26,11 @@ export default defineConfig({
     }
   },
   server: {
+    host: '127.0.0.1',
     proxy: {
-      '/api': 'https://canets.org'
+      '/api': process.env.CACAO_DEV_API_TARGET || 'http://127.0.0.1:80'
     }
   },
+  preview: { host: '127.0.0.1' },
   build: { chunkSizeWarningLimit: 1024 }
 })
