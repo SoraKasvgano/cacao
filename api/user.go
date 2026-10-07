@@ -1,31 +1,21 @@
 package api
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"math/rand"
 	"strconv"
-	"strings"
 	"time"
 
+	"crypto/sha256"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
+	"math/rand"
 )
 
 func LoginMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		path := c.Request.URL.String()
-		if !strings.HasPrefix(path, "/api/") {
-			c.Next()
-			return
-		}
-		if path == "/api/user/register" || path == "/api/user/login" {
-			c.Next()
-			return
-		}
 		idstr, errid := c.Cookie("id")
 		token, errtoken := c.Cookie("token")
 		if errid != nil || errtoken != nil || len(idstr) == 0 || len(token) == 0 {

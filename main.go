@@ -1,7 +1,9 @@
 package main
 
 import (
+	"net/http"
 	"path"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lanthora/cacao/api"
@@ -17,48 +19,10 @@ func init() {
 }
 
 func main() {
-	r := gin.New()
-	r.Use(candy.WebsocketMiddleware(), api.LoginMiddleware(), api.AdminMiddleware())
-
-	admin := r.Group("/api/admin")
-	admin.POST("/showUsers", api.AdminShowUsers)
-	admin.POST("/addUser", api.AdminAddUser)
-	admin.POST("/deleteUser", api.AdminDeleteUser)
-	admin.POST("/updateUserPassword", api.AdminUpdateUserPassword)
-	admin.POST("/getOpenRegisterConfig", api.AdminGetOpenRegisterConfig)
-	admin.POST("/setOpenRegisterConfig", api.AdminSetOpenRegisterConfig)
-	admin.POST("/getRegisterIntervalConfig", api.AdminGetRegisterIntervalConfig)
-	admin.POST("/setRegisterIntervalConfig", api.AdminSetRegisterIntervalConfig)
-	admin.POST("/getAutoCleanUserConfig", api.AdminGetAutoCleanUserConfig)
-	admin.POST("/setAutoCleanUserConfig", api.AdminSetAutoCleanUserConfig)
-	admin.POST("/getInactiveUserThresholdConfig", api.AdminGetInactiveUserThresholdConfig)
-	admin.POST("/setInactiveUserThresholdConfig", api.AdminSetInactiveUserThresholdConfig)
-	admin.POST("/cleanInactiveUser", api.AdminCleanInactiveUser)
-
-	user := r.Group("/api/user")
-	user.POST("/info", api.UserInfo)
-	user.POST("/statistics", api.UserStatistics)
-	user.POST("/register", api.UserRegister)
-	user.POST("/login", api.UserLogin)
-	user.POST("/changePassword", api.ChangePassword)
-	user.POST("/logout", api.UserLogout)
-
-	net := r.Group("/api/net")
-	net.POST("/show", api.NetShow)
-	net.POST("/insert", api.NetInsert)
-	net.POST("/edit", api.NetEdit)
-	net.POST("/delete", api.NetDelete)
-
-	device := r.Group("/api/device")
-	device.POST("/show", api.DeviceShow)
-	device.POST("/delete", api.DeviceDelete)
-
-	route := r.Group("/api/route")
-	route.POST("/show", api.RouteShow)
-	route.POST("/insert", api.RouteInsert)
-	route.POST("/delete", api.RouteDelete)
-
-	r.NoRoute(frontend.Static)
+	r, err := newRouter("")
+	if err != nil {
+		logger.Fatal("router initialization failed: %v", err)
+	}
 
 	storageDir := argp.Get("storage", ".")
 	crtFilename, findCrtErr := util.FindFileByExtFromDir(storageDir, ".crt")
@@ -76,4 +40,59 @@ func main() {
 			logger.Fatal("service run failed: %v", err)
 		}
 	}
+}
+
+func newRouter(trustedProxies string) (*gin.Engine, error) {
+	r := gin.New()
+	r.Use(candy.WebsocketMiddleware())
+
+	public := r.Group("/api")
+	public.POST("/user/register", api.UserRegister)
+	public.POST("/user/login", api.UserLogin)
+	protected := public.Group("", api.LoginMiddleware(), api.AdminMiddleware())
+
+	admin := protected.Group("/admin")
+	admin.POST("/showUsers", api.AdminShowUsers)
+	admin.POST("/addUser", api.AdminAddUser)
+	admin.POST("/deleteUser", api.AdminDeleteUser)
+	admin.POST("/updateUserPassword", api.AdminUpdateUserPassword)
+	admin.POST("/getOpenRegisterConfig", api.AdminGetOpenRegisterConfig)
+	admin.POST("/setOpenRegisterConfig", api.AdminSetOpenRegisterConfig)
+	admin.POST("/getRegisterIntervalConfig", api.AdminGetRegisterIntervalConfig)
+	admin.POST("/setRegisterIntervalConfig", api.AdminSetRegisterIntervalConfig)
+	admin.POST("/getAutoCleanUserConfig", api.AdminGetAutoCleanUserConfig)
+	admin.POST("/setAutoCleanUserConfig", api.AdminSetAutoCleanUserConfig)
+	admin.POST("/getInactiveUserThresholdConfig", api.AdminGetInactiveUserThresholdConfig)
+	admin.POST("/setInactiveUserThresholdConfig", api.AdminSetInactiveUserThresholdConfig)
+	admin.POST("/cleanInactiveUser", api.AdminCleanInactiveUser)
+
+	user := protected.Group("/user")
+	user.POST("/info", api.UserInfo)
+	user.POST("/statistics", api.UserStatistics)
+	user.POST("/changePassword", api.ChangePassword)
+	user.POST("/logout", api.UserLogout)
+
+	net := protected.Group("/net")
+	net.POST("/show", api.NetShow)
+	net.POST("/insert", api.NetInsert)
+	net.POST("/edit", api.NetEdit)
+	net.POST("/delete", api.NetDelete)
+
+	device := protected.Group("/device")
+	device.POST("/show", api.DeviceShow)
+	device.POST("/delete", api.DeviceDelete)
+
+	route := protected.Group("/route")
+	route.POST("/show", api.RouteShow)
+	route.POST("/insert", api.RouteInsert)
+	route.POST("/delete", api.RouteDelete)
+
+	r.NoRoute(func(c *gin.Context) {
+		if c.Request.URL.Path == "/api" || strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		frontend.Static(c)
+	})
+	return r, nil
 }
