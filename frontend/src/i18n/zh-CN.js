@@ -161,6 +161,66 @@ export default {
             success: '清理成功'
         }
     },
+    adminTasks: {
+        title: '后台任务',
+        subtitle: '自动维护与执行状态',
+        retention:
+            '清理按有界批次执行。不活跃用户遵循原有开关与阈值，设备租期仅清理离线设备；保留历史流量。累计指标在服务重启后重新计数。',
+        refresh: '刷新',
+        autoRefresh: '每 5 秒自动刷新',
+        name: '任务',
+        every: '每 {seconds} 秒',
+        manualOnly: '仅手动执行',
+        storage: '数据库批量写入',
+        pendingDevices: '待落库设备数',
+        storageLabels: {
+            queueDepth: '排队操作数',
+            batchesCommitted: '已提交批次数',
+            jobsCommitted: '已提交操作数',
+            jobsFailed: '失败操作数',
+            lastBatchSize: '最近一批操作数'
+        },
+        state: '状态',
+        running: '运行中',
+        failed: '失败',
+        ready: '成功',
+        pending: '待运行',
+        lastStartedAt: '最近开始',
+        lastSuccessAt: '最近成功',
+        nextRunAt: '下次计划',
+        duration: '最近耗时',
+        rows: '影响行数：最近 / 累计',
+        runs: '执行次数 / 失败次数',
+        error: '最近错误',
+        action: '操作',
+        run: '立即运行',
+        confirmRun: '按此任务配置的清理策略立即执行？',
+        confirmInactive: '按已配置的不活跃天数立即清理用户？此次手动清理不受自动清理开关限制。',
+        queued: '任务已调度',
+        details: '最近执行明细',
+        names: {
+            maintenance: '业务数据清理',
+            'device-flush': '设备状态落库',
+            'integrity-audit': '数据完整性巡检',
+            'clean-inactive-users': '不活跃用户清理'
+        },
+        detailLabels: {
+            devices: '清理设备数',
+            routes: '清理路由数',
+            nets: '清理网络数',
+            users: '清理用户数',
+            expiredSessions: '清理过期会话数',
+            duplicateUsers: '用户名重复组数',
+            duplicateNets: '网络标识重复组数',
+            duplicateDevices: '设备标识重复组数',
+            duplicateConfigs: '配置键重复组数',
+            duplicateDeviceIPs: '设备 IP 重复组数',
+            duplicateRoutes: '路由重复组数',
+            orphanNets: '剩余孤儿网络数',
+            orphanDevices: '剩余孤儿设备数',
+            orphanRoutes: '剩余孤儿路由数'
+        }
+    },
     adminLicense: {
         title: '许可证',
         subtitle: '许可证信息',

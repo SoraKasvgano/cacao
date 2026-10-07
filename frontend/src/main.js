@@ -8,6 +8,7 @@ import RegisterView from './views/RegisterView.vue'
 import LoginView from './views/LoginView.vue'
 import AdminUser from './views/AdminUser.vue'
 import AdminSetting from './views/AdminSetting.vue'
+import AdminTasks from './views/AdminTasks.vue'
 import AdminLicense from './views/AdminLicense.vue'
 import LoadingView from './views/LoadingView.vue'
 import RouteView from './views/RouteView.vue'
@@ -28,6 +29,7 @@ const routes = [
   { path: '/admin/license', component: AdminLicense, meta: { role: 'admin' } },
   { path: '/admin/user', component: AdminUser, meta: { role: 'admin' } },
   { path: '/admin/setting', component: AdminSetting, meta: { role: 'admin' } },
+  { path: '/admin/tasks', component: AdminTasks, meta: { role: 'admin' } },
   { path: '/:pathMatch(.*)', redirect: '/' }
 ]
 

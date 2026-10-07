@@ -282,6 +282,5 @@ func AdminSetInactiveUserThresholdConfig(c *gin.Context) {
 }
 
 func AdminCleanInactiveUser(c *gin.Context) {
-	candy.CleanInactiveUser()
-	setResponseData(c, nil)
+	triggerBackgroundTask(c, "clean-inactive-users")
 }

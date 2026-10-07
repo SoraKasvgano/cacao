@@ -39,6 +39,7 @@ func main() {
 		logger.Fatal("start background tasks failed: %v", err)
 	}
 	defer tasks.Stop(context.Background())
+	api.SetBackgroundTasks(tasks)
 
 	r, err := newRouter(argp.Get("trusted-proxies", ""))
 	if err != nil {
@@ -101,6 +102,8 @@ func newRouter(trustedProxies string) (*gin.Engine, error) {
 	admin.POST("/getInactiveUserThresholdConfig", api.AdminGetInactiveUserThresholdConfig)
 	admin.POST("/setInactiveUserThresholdConfig", api.AdminSetInactiveUserThresholdConfig)
 	admin.POST("/cleanInactiveUser", api.AdminCleanInactiveUser)
+	admin.POST("/backgroundTasks", api.AdminBackgroundTasks)
+	admin.POST("/runBackgroundTask", api.AdminRunBackgroundTask)
 
 	user := protected.Group("/user")
 	user.POST("/info", api.UserInfo)
