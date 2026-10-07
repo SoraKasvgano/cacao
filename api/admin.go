@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
@@ -105,7 +104,6 @@ func AdminAddUser(c *gin.Context) {
 	user := model.User{
 		Name:     request.Username,
 		Password: hashUserPassword(request.Username, request.Password),
-		Token:    uuid.NewString(),
 		Role:     "normal",
 	}
 
@@ -180,8 +178,12 @@ func AdminUpdateUserPassword(c *gin.Context) {
 		setErrorCode(c, Unexpected)
 		return
 	}
-	user.Password = hashUserPassword(user.Name, request.Password)
-	user.Save()
+	if err := db.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+		"password": hashUserPassword(user.Name, request.Password), "token": "", "token_expires_at": nil,
+	}).Error; err != nil {
+		setErrorCode(c, Unexpected)
+		return
+	}
 	setResponseData(c, nil)
 }
 

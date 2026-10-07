@@ -2,12 +2,12 @@ package api
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"crypto/sha256"
 	"fmt"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/lanthora/cacao/candy"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
@@ -24,7 +24,7 @@ func LoginMiddleware() gin.HandlerFunc {
 			return
 		}
 		id, err := strconv.ParseUint(idstr, 10, 64)
-		if err != nil {
+		if err != nil || id == 0 || uint64(uint(id)) != id || len(token) > 128 {
 			setErrorCode(c, NotLoggedIn)
 			c.Abort()
 			return
@@ -33,11 +33,30 @@ func LoginMiddleware() gin.HandlerFunc {
 		user.ID = uint(id)
 
 		db := storage.Get()
-		result := db.Where(user).Take(user)
-		if result.Error != nil || user.Token != token {
+		result := db.Where("id = ?", id).Take(user)
+		if result.Error != nil || !validSessionToken(user.Token, token) || user.TokenExpiresAt == nil || !time.Now().Before(*user.TokenExpiresAt) {
 			setErrorCode(c, NotLoggedIn)
 			c.Abort()
 			return
+		}
+		if !strings.HasPrefix(user.Token, "sha256:") {
+			// Upgrade stored legacy tokens without changing the browser cookie.
+			result := db.Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).UpdateColumn("token", hashSessionToken(token))
+			if result.Error != nil {
+				setErrorCode(c, Unexpected)
+				c.Abort()
+				return
+			}
+			if result.RowsAffected == 0 {
+				// Another request may have migrated or revoked this session.
+				if db.Where("id = ?", id).Take(user).Error != nil || !validSessionToken(user.Token, token) || user.TokenExpiresAt == nil || !time.Now().Before(*user.TokenExpiresAt) {
+					setErrorCode(c, NotLoggedIn)
+					c.Abort()
+					return
+				}
+			} else {
+				user.Token = hashSessionToken(token)
+			}
 		}
 		c.Set("user", user)
 		c.Next()
@@ -121,18 +140,18 @@ func UserRegister(c *gin.Context) {
 	user := model.User{
 		Name:     request.Username,
 		Password: hashUserPassword(request.Username, request.Password),
-		Token:    uuid.NewString(),
 		Role:     role,
 		IP:       c.ClientIP(),
 	}
+
+	token := newSession(&user)
 
 	if result := db.Create(&user); result.Error != nil {
 		setUnexpectedMessage(c, result.Error.Error())
 		return
 	}
 
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, gin.H{
 		"name": user.Name,
@@ -182,11 +201,16 @@ func UserLogin(c *gin.Context) {
 		user.IP = c.ClientIP()
 	}
 
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	previousPassword := user.Password
+	token := newSession(&user)
+	result := db.Model(&model.User{}).Where("id = ? AND password = ?", user.ID, previousPassword).Updates(map[string]interface{}{
+		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt, "ip": user.IP,
+	})
+	if result.Error != nil || result.RowsAffected != 1 {
+		setErrorCode(c, IncorrectUsernameOrPassword)
+		return
+	}
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, gin.H{
 		"name": user.Name,
@@ -196,11 +220,12 @@ func UserLogin(c *gin.Context) {
 
 func UserLogout(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", "", -1, "/", "", false, true)
-	c.SetCookie("token", "", -1, "/", "", false, true)
+	result := storage.Get().Model(&model.User{}).Where("id = ? AND token = ?", user.ID, user.Token).Updates(map[string]interface{}{"token": "", "token_expires_at": nil})
+	if result.Error != nil {
+		setErrorCode(c, Unexpected)
+		return
+	}
+	setSessionCookies(c, 0, "", -1)
 
 	setResponseData(c, nil)
 }
@@ -227,12 +252,17 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
+	previousPassword, previousToken := user.Password, user.Token
 	user.Password = hashUserPassword(user.Name, request.NewPassword)
-	user.Token = uuid.NewString()
-	user.Save()
-
-	c.SetCookie("id", strconv.FormatUint(uint64(user.ID), 10), 86400, "/", "", false, true)
-	c.SetCookie("token", user.Token, 86400, "/", "", false, true)
+	token := newSession(user)
+	result := storage.Get().Model(&model.User{}).Where("id = ? AND password = ? AND token = ?", user.ID, previousPassword, previousToken).Updates(map[string]interface{}{
+		"password": user.Password, "token": user.Token, "token_expires_at": user.TokenExpiresAt,
+	})
+	if result.Error != nil || result.RowsAffected != 1 {
+		setErrorCode(c, NotLoggedIn)
+		return
+	}
+	setSessionCookies(c, user.ID, token, int(sessionLifetime.Seconds()))
 
 	setResponseData(c, nil)
 }
