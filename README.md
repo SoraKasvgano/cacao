@@ -4,6 +4,8 @@ Candy Server with WebUI
 
 ## Build
 
+Requires Go 1.25 or newer and Node.js/npm for the frontend build.
+
 ```bash
 # build a binary that runs natively
 make
