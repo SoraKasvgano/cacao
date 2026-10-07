@@ -2,6 +2,10 @@
 
 Candy Server with WebUI
 
+## Contributing
+
+See [Git 提交与 PR 约定](CONTRIBUTING.md) before starting a feature or opening a PR.
+
 ## Build
 
 ```bash
