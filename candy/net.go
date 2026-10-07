@@ -25,7 +25,6 @@ func init() {
 	for _, netModel := range model.GetNets() {
 		InsertNet(&netModel)
 	}
-	go autoFlush()
 }
 
 type Net struct {
@@ -296,11 +295,4 @@ func strIpToUint32(ip string) uint32 {
 
 	rv := uint32(s[0]<<24 | s[1]<<16 | s[2]<<8 | s[3])
 	return rv
-}
-
-func autoFlush() {
-	if _, err := FlushDeviceState(context.Background()); err != nil {
-		logger.Info("device flush failed: %v", err)
-	}
-	time.AfterFunc(5*time.Second, autoFlush)
 }

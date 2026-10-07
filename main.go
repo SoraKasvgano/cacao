@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -30,6 +31,15 @@ func main() {
 	if err := model.EnsureIntegrity(); err != nil {
 		logger.Fatal("install database integrity failed: %v", err)
 	}
+	tasks, err := newBackgroundTasks()
+	if err != nil {
+		logger.Fatal("register background tasks failed: %v", err)
+	}
+	if err := tasks.Start(context.Background()); err != nil {
+		logger.Fatal("start background tasks failed: %v", err)
+	}
+	defer tasks.Stop(context.Background())
+
 	r, err := newRouter(argp.Get("trusted-proxies", ""))
 	if err != nil {
 		logger.Fatal("invalid trusted proxies: %v", err)

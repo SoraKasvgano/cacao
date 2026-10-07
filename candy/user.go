@@ -7,10 +7,6 @@ import (
 	"github.com/lanthora/cacao/model"
 )
 
-func init() {
-	go autoCleanInactiveUser()
-}
-
 func CleanInactiveUser() {
 	threshold := func() int {
 		str := model.GetConfig("inactiveUserThreshold", "7")
@@ -31,11 +27,4 @@ func CleanInactiveUser() {
 			u.Delete()
 		}
 	}
-}
-
-func autoCleanInactiveUser() {
-	if model.GetConfig("autoCleanUser", "false") == "true" {
-		CleanInactiveUser()
-	}
-	time.AfterFunc(time.Hour, autoCleanInactiveUser)
 }
