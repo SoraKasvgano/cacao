@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +21,8 @@ import (
 )
 
 const sessionLifetime = 24 * time.Hour
+
+var registrationMu sync.Mutex
 
 // Hash a fixed-size digest with bcrypt so existing long passwords remain usable.
 func hashUserPassword(username, password string) string {
@@ -70,6 +74,15 @@ func setSessionCookies(c *gin.Context, userID uint, token string, maxAge int) {
 	}
 	c.SetCookie("id", id, maxAge, "/", "", secure, true)
 	c.SetCookie("token", token, maxAge, "/", "", secure, true)
+}
+
+func validSetupToken(supplied string) bool {
+	expected := os.Getenv("CACAO_SETUP_TOKEN")
+	if len(expected) < 32 || supplied == "" {
+		return false
+	}
+	a, b := sha256.Sum256([]byte(expected)), sha256.Sum256([]byte(supplied))
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 func randomString(n int) string {

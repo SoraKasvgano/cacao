@@ -37,8 +37,17 @@
         </a-input>
       </a-form-item>
 
+      <a-form-item name="setupToken" :label="$t('register.setupToken')">
+        <a-input-password
+          v-model:value="registerState.setupToken"
+          autocomplete="off"
+          :placeholder="$t('register.setupTokenPlaceholder')"
+        />
+        <div class="setup-help">{{ $t('register.setupTokenHelp') }}</div>
+      </a-form-item>
+
       <a-form-item>
-        <a-button type="primary" html-type="submit" class="register-form-button">
+        <a-button type="primary" html-type="submit" class="register-form-button" :loading="submitting">
           {{ $t('register.register') }}
         </a-button>
       </a-form-item>
@@ -47,31 +56,38 @@
 </template>
 
 <script setup>
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 import axios from 'axios'
 import { useRouter } from 'vue-router'
 
 const registerState = reactive({
   username: '',
-  password: ''
+  password: '',
+  setupToken: ''
 })
 
 const router = useRouter()
+const submitting = ref(false)
 
-const userregister = async (username, password) => {
-  const response = await axios.post('/api/user/register', {
-    username: username,
-    password: password
-  })
-
-  const status = response.data.status
-  if (status == 0) {
-    router.push('/')
+const onFinish = async (values) => {
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    const response = await axios.post('/api/user/register', {
+      username: values.username,
+      password: values.password,
+      setupToken: values.setupToken || undefined
+    })
+    if (response.data.status === 0) {
+      registerState.password = ''
+      registerState.setupToken = ''
+      router.replace('/')
+    }
+  } catch {
+    // The global API interceptor displays request failures, including rate limits.
+  } finally {
+    submitting.value = false
   }
-}
-
-const onFinish = (values) => {
-  userregister(values.username, values.password)
 }
 </script>
 
@@ -88,5 +104,10 @@ const onFinish = (values) => {
 }
 .register-form-button {
   width: 100%;
+}
+.setup-help {
+  margin-top: 8px;
+  color: #666;
+  font-size: 12px;
 }
 </style>

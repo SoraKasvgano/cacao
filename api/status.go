@@ -30,6 +30,7 @@ func init() {
 	statusMessage[DeviceNotExists] = "device not exists"
 	statusMessage[CannotDeleteOnlineDevice] = "cannot delete online device"
 	statusMessage[InvalidInactiveUserThreshold] = "invalid inactive user threshold"
+	statusMessage[SetupRequired] = "initial setup requires a valid setup token"
 }
 
 const (
@@ -55,6 +56,7 @@ const (
 	DeviceNotExists
 	CannotDeleteOnlineDevice
 	InvalidInactiveUserThreshold
+	SetupRequired
 )
 
 var statusMessage map[int]string

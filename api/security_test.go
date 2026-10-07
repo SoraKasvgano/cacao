@@ -169,6 +169,50 @@ func TestPasswordChangeForAdminAndLongPasswords(t *testing.T) {
 	}
 }
 
+func TestSetupRequiresSecret(t *testing.T) {
+	t.Setenv("CACAO_SETUP_TOKEN", "")
+	if validSetupToken("") {
+		t.Fatal("unconfigured setup accepted")
+	}
+	secret := strings.Repeat("s", 32)
+	t.Setenv("CACAO_SETUP_TOKEN", secret)
+	if validSetupToken("wrong") || !validSetupToken(secret) {
+		t.Fatal("setup secret comparison failed")
+	}
+	var count int64
+	storage.Get().Unscoped().Model(&model.User{}).Count(&count)
+	if count != 0 {
+		t.Skip("bootstrap endpoint test needs a fresh test database")
+	}
+	r := securityRouter()
+	if _, status := securityRequest(t, r, "/api/user/register", `{"username":"attacker","password":"password"}`); status != SetupRequired {
+		t.Fatal("anonymous first user can claim admin")
+	}
+	previousRegistration := model.GetConfig("openreg", "missing")
+	t.Cleanup(func() {
+		storage.Get().Unscoped().Where("name = ?", "bootstrap").Delete(&model.User{})
+		if previousRegistration == "missing" {
+			storage.Get().Unscoped().Where("key = ?", "openreg").Delete(&model.Config{})
+		} else {
+			model.SetConfig("openreg", previousRegistration)
+		}
+	})
+	w, status := securityRequest(t, r, "/api/user/register", fmt.Sprintf(`{"username":"bootstrap","password":"password","setupToken":%q}`, secret))
+	if status != Success {
+		t.Fatalf("authorized setup rejected: %d", status)
+	}
+	var admin model.User
+	if storage.Get().Where("name = ?", "bootstrap").First(&admin).Error != nil || admin.Role != "admin" {
+		t.Fatal("authorized setup did not create administrator")
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", w.Result().Cookies()...); status != Success {
+		t.Fatal("bootstrap login session rejected")
+	}
+	if _, status := securityRequest(t, r, "/api/user/register", fmt.Sprintf(`{"username":"attacker","password":"password","setupToken":%q}`, secret)); status != RegistrationDisabled {
+		t.Fatal("setup secret remained usable after initialization")
+	}
+}
+
 func TestCookiesSecureWithTLS(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "https://example.test/", nil)

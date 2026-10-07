@@ -80,17 +80,31 @@ func UserStatistics(c *gin.Context) {
 }
 
 func UserRegister(c *gin.Context) {
-	if model.GetConfig("openreg", "true") != "true" {
-		setErrorCode(c, RegistrationDisabled)
-		return
-	}
-
 	var request struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		SetupToken string `json:"setupToken"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		setErrorCode(c, InvalidRequest)
+		return
+	}
+	registrationMu.Lock()
+	defer registrationMu.Unlock()
+	db := storage.Get()
+	var count int64
+	if err := db.Unscoped().Model(&model.User{}).Count(&count).Error; err != nil {
+		setErrorCode(c, Unexpected)
+		return
+	}
+	initialSetup := count == 0
+	if initialSetup {
+		if !validSetupToken(request.SetupToken) {
+			setErrorCode(c, SetupRequired)
+			return
+		}
+	} else if model.GetConfig("openreg", "false") != "true" {
+		setErrorCode(c, RegistrationDisabled)
 		return
 	}
 	if request.Username == "@" {
@@ -106,7 +120,6 @@ func UserRegister(c *gin.Context) {
 		return
 	}
 
-	db := storage.Get()
 	if func() bool {
 		count := int64(0)
 		db.Model(&model.User{}).Where(&model.User{IP: c.ClientIP(), Role: "normal"}).Where("created_at > ?", time.Now().Add(-1*registerInterval())).Count(&count)
@@ -125,14 +138,10 @@ func UserRegister(c *gin.Context) {
 		return
 	}
 
-	role := func() string {
-		count := int64(0)
-		db.Model(&model.User{}).Count(&count)
-		if count == 0 {
-			return "admin"
-		}
-		return "normal"
-	}()
+	role := "normal"
+	if initialSetup {
+		role = "admin"
+	}
 
 	user := model.User{
 		Name:     request.Username,
@@ -140,7 +149,6 @@ func UserRegister(c *gin.Context) {
 		Role:     role,
 		IP:       c.ClientIP(),
 	}
-
 	token := newSession(&user)
 
 	if result := db.Create(&user); result.Error != nil {

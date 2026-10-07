@@ -10,6 +10,9 @@ export default {
         or: '或者'
     },
     register: {
+        setupToken: '首次部署初始化密钥（可选）',
+        setupTokenPlaceholder: '首次创建管理员时填写',
+        setupTokenHelp: '仅创建首个管理员时需要，由部署者提供。已有站点的普通用户注册请留空。',
         username: '用户名',
         password: '密码',
         register: '注册',
