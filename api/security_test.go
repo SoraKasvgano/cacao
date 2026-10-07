@@ -114,6 +114,61 @@ func TestLegacySessionUpgradeAndLogout(t *testing.T) {
 	}
 }
 
+func TestLegacyPasswordUpgradeAndRevocation(t *testing.T) {
+	r := securityRouter()
+	u, oldCookies := testUser(t, "normal")
+	w, status := securityRequest(t, r, "/api/user/login", fmt.Sprintf(`{"username":%q,"password":"old-password"}`, u.Name))
+	if status != Success {
+		t.Fatalf("legacy login failed: %d", status)
+	}
+	storage.Get().First(&u, u.ID)
+	if !strings.HasPrefix(u.Password, "bcrypt-sha256:") || !verifyUserPassword(&u, "old-password") {
+		t.Fatal("legacy password migration failed")
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", oldCookies...); status != NotLoggedIn {
+		t.Fatal("login did not rotate token")
+	}
+	cookies := w.Result().Cookies()
+	for _, cookie := range cookies {
+		if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+			t.Fatalf("unsafe cookie: %s", cookie.Name)
+		}
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", cookies...); status != Success {
+		t.Fatal("new login cookies rejected")
+	}
+	_, adminCookies := testUser(t, "admin")
+	if _, status := securityRequest(t, r, "/api/admin/updateUserPassword", fmt.Sprintf(`{"username":%q,"password":"new-password"}`, u.Name), adminCookies...); status != Success {
+		t.Fatalf("password reset failed: %d", status)
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", cookies...); status != NotLoggedIn {
+		t.Fatal("reset did not revoke old session")
+	}
+	if _, status := securityRequest(t, r, "/api/user/login", fmt.Sprintf(`{"username":%q,"password":"old-password"}`, u.Name)); status != IncorrectUsernameOrPassword {
+		t.Fatal("old password accepted")
+	}
+}
+
+func TestPasswordChangeForAdminAndLongPasswords(t *testing.T) {
+	r := securityRouter()
+	u, cookies := testUser(t, "admin")
+	password := strings.Repeat("long-password", 20)
+	w, status := securityRequest(t, r, "/api/user/changePassword", fmt.Sprintf(`{"old":"old-password","new":%q}`, password), cookies...)
+	if status != Success {
+		t.Fatalf("admin password change failed: %d", status)
+	}
+	storage.Get().First(&u, u.ID)
+	if !verifyUserPassword(&u, password) || verifyUserPassword(&u, password+"x") {
+		t.Fatal("long password truncated")
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", cookies...); status != NotLoggedIn {
+		t.Fatal("password change kept old token")
+	}
+	if _, status := securityRequest(t, r, "/api/user/info", "{}", w.Result().Cookies()...); status != Success {
+		t.Fatal("new session rejected")
+	}
+}
+
 func TestCookiesSecureWithTLS(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "https://example.test/", nil)
