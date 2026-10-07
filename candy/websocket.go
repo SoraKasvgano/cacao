@@ -17,7 +17,6 @@ import (
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
 	"github.com/lunixbochs/struc"
-	"gorm.io/gorm"
 )
 
 const (
@@ -321,6 +320,8 @@ func (ws *candysocket) handleDHCPMessage(buffer []byte) error {
 	}
 
 	db := storage.Get()
+	ws.net.dhcpMutex.Lock()
+	defer ws.net.dhcpMutex.Unlock()
 
 	// 检查能否使用数据库中地址, 地址可用时更新响应结果
 	canUseLatestAddress := func() bool {
@@ -356,17 +357,24 @@ func (ws *candysocket) handleDHCPMessage(buffer []byte) error {
 			return false
 		}
 		cidr := func(input []byte) string {
-			return string(input[:bytes.IndexByte(input[:], 0)])
+			if end := bytes.IndexByte(input, 0); end >= 0 {
+				input = input[:end]
+			}
+			return string(input)
 		}(message.Cidr)
 
 		ip, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
+		if err != nil || ip.To4() == nil || len(ipNet.Mask) != net.IPv4len {
 			return true
 		}
-		if binary.BigEndian.Uint32(ipNet.IP) != ws.net.net {
+		if binary.BigEndian.Uint32(ipNet.IP.To4()) != ws.net.net {
 			return true
 		}
 		if binary.BigEndian.Uint32(ipNet.Mask) != ws.net.mask {
+			return true
+		}
+		host := binary.BigEndian.Uint32(ip.To4()) & ^ws.net.mask
+		if host == 0 || host == ^ws.net.mask {
 			return true
 		}
 		devices := []model.Device{}
@@ -384,26 +392,40 @@ func (ws *candysocket) handleDHCPMessage(buffer []byte) error {
 	}()
 
 	// 用户传入的地址也不可用时, 生成一个新地址, 并更新响应结果
-	var oldHost = ws.net.host
-	for needGenNewAddress {
-		device := &model.Device{NetID: ws.net.model.ID, IP: ws.net.updateHost()}
-		if db.Where(device).Take(&device).Error == gorm.ErrRecordNotFound {
+	// One query bounds the database work even for a large or exhausted subnet.
+	var assignedIPs []string
+	if needGenNewAddress {
+		if err := db.Model(&model.Device{}).Where("net_id = ?", ws.net.model.ID).Pluck("ip", &assignedIPs).Error; err != nil {
+			return err
+		}
+	}
+	assigned := make(map[string]struct{}, len(assignedIPs))
+	for _, ip := range assignedIPs {
+		assigned[ip] = struct{}{}
+	}
+	maxAttempts := uint64(len(assigned)) + 1
+	if capacity := uint64(^ws.net.mask) - 1; maxAttempts > capacity {
+		maxAttempts = capacity
+	}
+	for attempts := uint64(0); needGenNewAddress; attempts++ {
+		if attempts >= maxAttempts {
+			ws.writeCloseMessage("not enough address")
+			return fmt.Errorf("dhcp failed: not enough address")
+		}
+		if _, used := assigned[ws.net.updateHost()]; !used {
 			ipNet := net.IPNet{IP: make(net.IP, 4), Mask: make(net.IPMask, 4)}
 			binary.BigEndian.PutUint32(ipNet.IP, ws.net.net|ws.net.host)
 			binary.BigEndian.PutUint32(ipNet.Mask, ws.net.mask)
 			message.Cidr = []byte(ipNet.String())
 			break
 		}
-		if oldHost == ws.net.host {
-			ws.writeCloseMessage("not enough address")
-			return fmt.Errorf("dhcp failed: not enough address")
-		}
 	}
 
 	var output bytes.Buffer
-	struc.Pack(&output, message)
-	ws.writeMessage(output.Bytes())
-	return nil
+	if err := struc.Pack(&output, message); err != nil {
+		return err
+	}
+	return ws.writeMessage(output.Bytes())
 }
 
 func (ws *candysocket) handlePeerConnMessage(buffer []byte) error {
