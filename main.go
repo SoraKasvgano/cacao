@@ -20,9 +20,9 @@ func init() {
 }
 
 func main() {
-	r, err := newRouter("")
+	r, err := newRouter(argp.Get("trusted-proxies", ""))
 	if err != nil {
-		logger.Fatal("router initialization failed: %v", err)
+		logger.Fatal("invalid trusted proxies: %v", err)
 	}
 
 	storageDir := argp.Get("storage", ".")
@@ -45,6 +45,16 @@ func main() {
 
 func newRouter(trustedProxies string) (*gin.Engine, error) {
 	r := gin.New()
+	var proxies []string
+	if strings.TrimSpace(trustedProxies) != "" {
+		for _, proxy := range strings.Split(trustedProxies, ",") {
+			proxies = append(proxies, strings.TrimSpace(proxy))
+		}
+	}
+	// Forwarded client addresses must only come from explicitly trusted proxies.
+	if err := r.SetTrustedProxies(proxies); err != nil {
+		return nil, err
+	}
 	// Gin's default panic logger dumps request headers, including session cookies.
 	recovery := gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
 		logger.Info("http handler panic: method=%s path=%s", c.Request.Method, c.FullPath())
