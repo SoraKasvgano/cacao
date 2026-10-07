@@ -34,17 +34,19 @@ const handleLangChange = (value) => {
 
 axios.interceptors.response.use(
   (response) => {
+    if (response.config.skipAuthRedirect) return response
     if (response.data.status != 0) {
       message.warning(response.data.msg)
     }
     if (response.data.status == 2) {
-      router.push('/login')
+      router.replace('/login')
     } else if (response.data.status == 11) {
-      router.push('/')
+      router.replace('/')
     }
     return response
   },
   (error) => {
+    if (error.config?.skipAuthRedirect) return Promise.reject(error)
     return Promise.reject(error)
   }
 )
