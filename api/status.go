@@ -72,7 +72,7 @@ func setErrorCode(c *gin.Context, code int) {
 }
 
 func setUnexpectedMessage(c *gin.Context, msg string) {
-	setResponse(c, Unexpected, msg, nil)
+	setErrorCode(c, Unexpected)
 }
 
 func setResponseData(c *gin.Context, data gin.H) {
