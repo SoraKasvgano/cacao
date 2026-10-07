@@ -167,7 +167,7 @@ func NetDelete(c *gin.Context) {
 	netModel := &model.Net{}
 	netModel.ID = request.ID
 	db := storage.Get()
-	result := db.Where(netModel).Take(netModel)
+	result := db.Where("id = ? AND user_id = ?", request.ID, user.ID).Take(netModel)
 
 	if result.Error != nil || netModel.UserID != user.ID {
 		setErrorCode(c, NetworkNotExists)

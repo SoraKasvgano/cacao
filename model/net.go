@@ -41,14 +41,14 @@ func (n *Net) Delete() {
 
 func GetNets() (nets []Net) {
 	db := storage.Get()
-	db.Find(&nets)
+	db.Model(&Net{}).Joins("join users on users.id = nets.user_id AND users.deleted_at IS NULL").Find(&nets)
 	return
 }
 
 func GetNetByNetID(netid uint) (net Net) {
 	if netid != 0 {
 		db := storage.Get()
-		db.Where(&Net{Model: gorm.Model{ID: netid}}).Unscoped().Take(&net)
+		db.Where(&Net{Model: gorm.Model{ID: netid}}).Take(&net)
 	}
 	return
 }
@@ -64,7 +64,7 @@ func GetNetsByUserID(userid uint) (nets []Net) {
 func GetNetIdByUsernameAndNetname(username, netname string) uint {
 	netid := uint(0)
 	db := storage.Get()
-	db.Model(&Net{}).Select("nets.id").Joins("left join users on users.id = nets.user_id").Where("users.name = ? and nets.name = ?", username, netname).Take(&netid)
+	db.Model(&Net{}).Select("nets.id").Joins("join users on users.id = nets.user_id AND users.deleted_at IS NULL").Where("users.name = ? and nets.name = ?", username, netname).Take(&netid)
 	return netid
 }
 
