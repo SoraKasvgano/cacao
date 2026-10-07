@@ -1,6 +1,7 @@
 package candy
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
@@ -12,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/lanthora/cacao/logger"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
@@ -25,7 +25,6 @@ func init() {
 	for _, netModel := range model.GetNets() {
 		InsertNet(&netModel)
 	}
-
 	go autoFlush()
 }
 
@@ -45,35 +44,23 @@ type Net struct {
 var idNetMap map[uint]*Net
 var idNetMapMutex sync.RWMutex
 
-func flush() {
+// FlushDeviceState is driven by the shared background task scheduler. Idle
+// online devices still refresh activity; individual packets never write SQL.
+func FlushDeviceState(ctx context.Context) (int, error) {
 	idNetMapMutex.RLock()
-	defer idNetMapMutex.RUnlock()
-
-	refreshedUsers := mapset.NewSet[uint]()
-
 	for _, n := range idNetMap {
 		n.ipWsMapMutex.RLock()
-		hasDeviceOnline := false
 		for _, ws := range n.ipWsMap {
 			ws.dev.mutex.Lock()
 			if ws.dev.model.Online {
-				hasDeviceOnline = true
-				ws.dev.model.SaveRxTxOnline()
+				model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 			}
 			ws.dev.mutex.Unlock()
 		}
 		n.ipWsMapMutex.RUnlock()
-		if hasDeviceOnline && !refreshedUsers.ContainsOne(n.model.UserID) {
-			model.RefreshUserLastActiveTimeByUserID(n.model.UserID)
-			refreshedUsers.Add(n.model.UserID)
-		}
 	}
-	refreshedUsers.Clear()
-}
-
-func autoFlush() {
-	flush()
-	time.AfterFunc(time.Duration(1)*time.Minute, autoFlush)
+	idNetMapMutex.RUnlock()
+	return model.FlushDeviceStates(ctx)
 }
 
 func (n *Net) ipConflict(ip, vmac string) bool {
@@ -177,7 +164,7 @@ func (n *Net) close() {
 	for ip, ws := range n.ipWsMap {
 		ws.dev.mutex.Lock()
 		ws.dev.model.Online = false
-		ws.dev.model.SaveRxTxOnline()
+		model.QueueDeviceState(*ws.dev.model, ws.dev.generation)
 		ws.dev.mutex.Unlock()
 		delete(n.ipWsMap, ip)
 	}
@@ -309,4 +296,11 @@ func strIpToUint32(ip string) uint32 {
 
 	rv := uint32(s[0]<<24 | s[1]<<16 | s[2]<<8 | s[3])
 	return rv
+}
+
+func autoFlush() {
+	if _, err := FlushDeviceState(context.Background()); err != nil {
+		logger.Info("device flush failed: %v", err)
+	}
+	time.AfterFunc(5*time.Second, autoFlush)
 }

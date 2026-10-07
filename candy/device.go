@@ -7,6 +7,13 @@ import (
 	"github.com/lanthora/cacao/model"
 )
 
+type Device struct {
+	mutex      sync.Mutex
+	model      *model.Device
+	ip         uint32
+	generation uint64
+}
+
 func init() {
 	go autoCleanInactiveDevice()
 }
@@ -24,10 +31,4 @@ func autoCleanInactiveDevice() {
 		}
 	}
 	time.AfterFunc(time.Hour, autoCleanInactiveDevice)
-}
-
-type Device struct {
-	mutex sync.Mutex
-	model *model.Device
-	ip    uint32
 }
