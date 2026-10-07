@@ -1,6 +1,7 @@
 package candy
 
 import (
+	"sync"
 	"time"
 
 	"github.com/lanthora/cacao/model"
@@ -26,6 +27,7 @@ func autoCleanInactiveDevice() {
 }
 
 type Device struct {
+	mutex sync.Mutex
 	model *model.Device
 	ip    uint32
 }

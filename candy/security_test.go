@@ -66,6 +66,16 @@ func newNamedTestWebsocketNetwork(t *testing.T, cidr, username, netname string) 
 	n := getNetById(network.ID)
 	t.Cleanup(func() {
 		DeleteNet(network.ID)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			n.ipWsMapMutex.RLock()
+			remaining := len(n.connections)
+			n.ipWsMapMutex.RUnlock()
+			if remaining == 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		db.Unscoped().Where("net_id = ?", network.ID).Delete(&model.Device{})
 		db.Unscoped().Delete(network)
 		db.Unscoped().Delete(user)
@@ -165,6 +175,25 @@ func TestAuthenticationTimestamps(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedMessagesRejected(t *testing.T) {
+	for _, kind := range []uint8{AUTH, DHCP, PEER, FORWARD, DISCOVERY, GENERAL} {
+		t.Run(fmt.Sprint(kind), func(t *testing.T) {
+			for _, dev := range []*Device{nil, {model: &model.Device{}}} {
+				ws := &candysocket{dev: dev, net: &Net{model: &model.Net{}}}
+				if err := ws.handleMessage([]byte{kind}); err == nil {
+					t.Fatal("unauthenticated or truncated message accepted")
+				}
+			}
+		})
+	}
+	ws := &candysocket{}
+	for _, input := range [][]byte{nil, {}, {ROUTE}, make([]byte, maxWebsocketMessageSize+1)} {
+		if ws.handleMessage(input) == nil {
+			t.Fatal("malformed frame accepted")
+		}
+	}
+}
+
 func TestWebsocketHandshakeAndFrameLimits(t *testing.T) {
 	_, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
 	for _, origin := range []string{"https://attacker.invalid", "null"} {
@@ -187,5 +216,129 @@ func TestWebsocketHandshakeAndFrameLimits(t *testing.T) {
 	_, response, err := dialTestWebsocketRequest(t, baseURL+"/api/protected", nil)
 	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("websocket bypassed API routing: %v, %v", response, err)
+	}
+}
+
+func TestAPIUsernameWebsocketCompatibility(t *testing.T) {
+	for _, netname := range []string{"@", "secure"} {
+		t.Run(netname, func(t *testing.T) {
+			n, url := newNamedTestWebsocketNetwork(t, "10.20.0.0/24", "api", netname)
+			conn := dialTestWebsocket(t, url)
+			authenticateTestWebsocket(t, conn, n, "0123456789abcdef", 0x0a140001)
+		})
+	}
+}
+
+func TestVMacDoesNotAuthorizePeerRelay(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	conn := dialTestWebsocket(t, url)
+	sendVMac(t, conn, n, "0123456789abcdef")
+	peer := signedMessage(t, "", &PeerConnMessage{Type: PEER, Src: 0, Dst: 0x0a140001, IP: 0x7f000001, Port: 1234})
+	conn.WriteMessage(websocket.BinaryMessage, peer)
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("VMAC alone authorized a peer message")
+	}
+	var count int64
+	storage.Get().Model(&model.Device{}).Where("net_id = ?", n.model.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("unauthenticated peer message created a device")
+	}
+}
+
+func TestAuthenticatedForwardingAndIdentityImmutability(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	conn := dialTestWebsocket(t, url)
+	ip := uint32(0x0a140001)
+	authenticateTestWebsocket(t, conn, n, "0123456789abcdef", ip)
+	// Routed packets keep their original source IP. Preserve subnet gateways.
+	packet := signedMessage(t, "", &ForwardMessage{Type: FORWARD, Src: 0xac100001, Dst: ip})
+	conn.WriteMessage(websocket.BinaryMessage, packet)
+	if _, response, err := conn.ReadMessage(); err != nil || !bytes.Equal(packet, response) {
+		t.Fatalf("legitimate routed forwarding failed: %v", err)
+	}
+	sendVMac(t, conn, n, "fedcba9876543210")
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("authenticated connection changed its identity")
+	}
+}
+
+func TestNetworkRevocationClosesPendingAuthentication(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	conn := dialTestWebsocket(t, url)
+	sendVMac(t, conn, n, "0123456789abcdef")
+	n.close()
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("pending connection survived network revocation")
+	}
+}
+
+func TestPasswordRotationRetiresExistingNetwork(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	online := dialTestWebsocket(t, url)
+	authenticateTestWebsocket(t, online, n, "0123456789abcdef", 0x0a140001)
+	pending := dialTestWebsocket(t, url)
+	sendVMac(t, pending, n, "fedcba9876543210")
+	updated := *n.model
+	updated.Password = "rotated-password"
+	updated.Update()
+	UpdateNet(&updated)
+	for _, conn := range []*websocket.Conn{online, pending} {
+		if _, _, err := conn.ReadMessage(); err == nil {
+			t.Fatal("old connection survived password rotation")
+		}
+	}
+	newNetwork := getNetById(n.model.ID)
+	reconnected := dialTestWebsocket(t, url)
+	authenticateTestWebsocket(t, reconnected, newNetwork, "0123456789abcdef", 0x0a140001)
+	var device model.Device
+	if err := storage.Get().Where(&model.Device{NetID: n.model.ID, VMac: "0123456789abcdef"}).Take(&device).Error; err != nil || !device.Online {
+		t.Fatalf("old connection cleanup overwrote the reconnected device: %v", err)
+	}
+}
+
+func TestReconnectDoesNotLoseReplacementConnection(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	first := dialTestWebsocket(t, url)
+	authenticateTestWebsocket(t, first, n, "0123456789abcdef", 0x0a140001)
+	second := dialTestWebsocket(t, url)
+	authenticateTestWebsocket(t, second, n, "0123456789abcdef", 0x0a140001)
+	if _, _, err := first.ReadMessage(); err == nil {
+		t.Fatal("duplicate device connection was not retired")
+	}
+	echo := signedMessage(t, "", &DiscoveryMessage{Type: DISCOVERY, Src: 0x0a140001, Dst: 0x0a140001})
+	second.WriteMessage(websocket.BinaryMessage, echo)
+	if _, response, err := second.ReadMessage(); err != nil || !bytes.Equal(response, echo) {
+		t.Fatalf("replacement device lost after old connection cleanup: %v", err)
+	}
+}
+
+func TestUnauthenticatedPingCannotExtendDeadline(t *testing.T) {
+	finished := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			finished <- err
+			return
+		}
+		defer conn.Close()
+		ws := &candysocket{conn: conn, authDeadline: time.Now().Add(100 * time.Millisecond)}
+		conn.SetPingHandler(ws.handlePingMessage)
+		ws.updateReadDeadline()
+		_, _, err = conn.ReadMessage()
+		finished <- err
+	}))
+	defer server.Close()
+	conn := dialTestWebsocket(t, "ws"+strings.TrimPrefix(server.URL, "http"))
+	for i := 0; i < 3; i++ {
+		conn.WriteControl(websocket.PingMessage, []byte("candy::test::1"), time.Now().Add(time.Second))
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-finished:
+		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+			t.Fatalf("expected authentication timeout, received %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unauthenticated ping extended the authentication deadline")
 	}
 }
