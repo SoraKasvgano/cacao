@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"io"
 	"mime"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lanthora/cacao/api"
@@ -35,13 +37,13 @@ func main() {
 	if findCrtErr == nil && findKeyErr == nil {
 		addr := argp.Get("listen", ":443")
 		logger.Info("listen=[%v]", addr)
-		if err := r.RunTLS(addr, path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename)); err != nil {
+		if err := newHTTPServer(addr, r).ListenAndServeTLS(path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal("tls service run failed: %v", err)
 		}
 	} else {
 		addr := argp.Get("listen", ":80")
 		logger.Info("listen=[%v]", addr)
-		if err := r.Run(addr); err != nil {
+		if err := newHTTPServer(addr, r).ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal("service run failed: %v", err)
 		}
 	}
@@ -115,6 +117,19 @@ func newRouter(trustedProxies string) (*gin.Engine, error) {
 		frontend.Static(c)
 	})
 	return r, nil
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 }
 
 func securityHeaders() gin.HandlerFunc {
