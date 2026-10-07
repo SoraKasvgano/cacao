@@ -84,8 +84,13 @@ func RouteInsert(c *gin.Context) {
 		NextHop:  request.NextHop,
 		Priority: request.Priority,
 	}
-	routeModel.Create()
-	candy.ReloadNet(netModel.ID)
+	created, err := routeModel.CreateOnce()
+	if !writeSucceeded(c, err) {
+		return
+	}
+	if created && !writeSucceeded(c, candy.ReloadNet(netModel.ID)) {
+		return
+	}
 
 	setResponseData(c, gin.H{
 		"routeid":  routeModel.ID,
@@ -118,7 +123,11 @@ func RouteDelete(c *gin.Context) {
 		return
 	}
 
-	routeModel.Delete()
-	candy.ReloadNet(netModel.ID)
+	if !writeSucceeded(c, routeModel.Delete()) {
+		return
+	}
+	if !writeSucceeded(c, candy.ReloadNet(netModel.ID)) {
+		return
+	}
 	setResponseData(c, nil)
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"github.com/lanthora/cacao/logger"
 	"github.com/lanthora/cacao/storage"
 	"gorm.io/gorm"
@@ -24,19 +25,52 @@ type Net struct {
 	Lease     uint
 }
 
-func (n *Net) Create() {
-	db := storage.Get()
-	db.Create(n)
+func (n *Net) Create() error {
+	return storage.Write(func(tx *gorm.DB) error {
+		var existing Net
+		err := tx.Where("user_id = ? AND name = ?", n.UserID, n.Name).Take(&existing).Error
+		if err == nil {
+			if existing.Password != n.Password || existing.DHCP != n.DHCP || existing.Broadcast != n.Broadcast || existing.Lease != n.Lease {
+				return ErrConflict
+			}
+			*n = existing
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		var user User
+		if err := tx.Where("id = ?", n.UserID).Take(&user).Error; err != nil {
+			return err
+		}
+		return tx.Create(n).Error
+	})
 }
 
-func (n *Net) Update() {
-	db := storage.Get()
-	db.Model(n).Select("*").Updates(n)
+func (n *Net) Update() error {
+	return storage.Write(func(tx *gorm.DB) error {
+		var current Net
+		if err := tx.Where("id = ? AND user_id = ?", n.ID, n.UserID).Take(&current).Error; err != nil {
+			return err
+		}
+		var count int64
+		if current.Name != n.Name {
+			if err := tx.Model(&Net{}).Where("user_id = ? AND name = ? AND id <> ?", n.UserID, n.Name, n.ID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count != 0 {
+				return ErrConflict
+			}
+		}
+		if current.Name == n.Name && current.Password == n.Password && current.DHCP == n.DHCP && current.Broadcast == n.Broadcast && current.Lease == n.Lease {
+			return nil
+		}
+		return tx.Model(&Net{}).Where("id = ?", n.ID).Select("name", "password", "dhcp", "broadcast", "lease").Updates(n).Error
+	})
 }
 
-func (n *Net) Delete() {
-	db := storage.Get()
-	db.Delete(n)
+func (n *Net) Delete() error {
+	return DeleteNetworkTree(n.ID, n.UserID)
 }
 
 func GetNets() (nets []Net) {
@@ -68,7 +102,7 @@ func GetNetIdByUsernameAndNetname(username, netname string) uint {
 	return netid
 }
 
-func DeleteNetByNetID(netid uint) {
-	db := storage.Get()
-	db.Delete(&Net{Model: gorm.Model{ID: netid}})
+func DeleteNetByNetID(netid uint) error {
+	network := GetNetByNetID(netid)
+	return DeleteNetworkTree(netid, network.UserID)
 }

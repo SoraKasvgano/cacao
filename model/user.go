@@ -30,14 +30,18 @@ type User struct {
 	IP             string
 }
 
-func (u *User) Save() {
-	db := storage.Get()
-	db.Save(u)
+func (u *User) Save() error {
+	return storage.Write(func(tx *gorm.DB) error {
+		if u.ID == 0 {
+			return tx.Create(u).Error
+		}
+		return tx.Model(&User{}).Where("id = ?", u.ID).Select("name", "password", "token", "token_expires_at", "role", "ip").Updates(u).Error
+	})
 }
 
-func (u *User) Delete() {
-	db := storage.Get()
-	db.Delete(u)
+func (u *User) Delete() error {
+	_, err := DeleteUserTree(u.ID)
+	return err
 }
 
 func GetUsers() (users []User) {
@@ -46,9 +50,9 @@ func GetUsers() (users []User) {
 	return
 }
 
-func DeleteUserByUserID(userid uint) {
-	db := storage.Get()
-	db.Delete(&User{Model: gorm.Model{ID: userid}})
+func DeleteUserByUserID(userid uint) error {
+	_, err := DeleteUserTree(userid)
+	return err
 }
 
 func GetLastActiveTimeByUserID(userid uint) time.Time {
@@ -62,10 +66,12 @@ func GetLastActiveTimeByUserID(userid uint) time.Time {
 	return time.Now()
 }
 
-func RefreshUserLastActiveTimeByUserID(userid uint) {
+func RefreshUserLastActiveTimeByUserID(userid uint) error {
 	if userid != 0 {
-		db := storage.Get()
 		// Updating activity must never restore a concurrently revoked session.
-		db.Model(&User{}).Where("id = ?", userid).UpdateColumn("updated_at", time.Now())
+		return storage.Write(func(tx *gorm.DB) error {
+			return tx.Model(&User{}).Where("id = ?", userid).UpdateColumn("updated_at", time.Now()).Error
+		})
 	}
+	return nil
 }

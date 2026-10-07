@@ -30,6 +30,7 @@ func securityRouter() *gin.Engine {
 	protected.POST("/user/changePassword", ChangePassword)
 	protected.POST("/admin/updateUserPassword", AdminUpdateUserPassword)
 	protected.POST("/admin/showUsers", AdminShowUsers)
+	protected.POST("/admin/addUser", AdminAddUser)
 	protected.POST("/net/delete", NetDelete)
 	protected.POST("/device/delete", DeviceDelete)
 	protected.POST("/route/delete", RouteDelete)

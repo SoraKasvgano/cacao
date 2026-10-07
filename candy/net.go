@@ -241,13 +241,8 @@ func DeleteNet(netid uint) {
 	delete(idNetMap, netid)
 }
 
-func ReloadNet(netid uint) {
-	idNetMapMutex.Lock()
-	defer idNetMapMutex.Unlock()
-	if n := idNetMap[netid]; n != nil {
-		n.close()
-		insertNetLocked(n.model)
-	}
+func ReloadNet(netid uint) error {
+	return syncNet(netid, true)
 }
 
 func getNetById(netid uint) *Net {

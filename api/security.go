@@ -22,8 +22,6 @@ import (
 
 const sessionLifetime = 24 * time.Hour
 
-var registrationMu sync.Mutex
-
 // A concurrent burst must not schedule unbounded bcrypt work before failed
 // attempts have had a chance to reach the per-IP/account limiter.
 var passwordWork = make(chan struct{}, 8)
