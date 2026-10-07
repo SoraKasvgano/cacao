@@ -13,11 +13,21 @@ import (
 
 func init() {
 	storageDir := argp.Get("storage", ".")
-	err := os.MkdirAll(storageDir, os.ModeDir|os.ModePerm)
+	err := os.MkdirAll(storageDir, 0700)
 	if err != nil {
 		logger.Fatal("make storage dir failed: %v", err)
 	}
-	db, err = gorm.Open(sqlite.Open(path.Join(storageDir, "sqlite.db")), &gorm.Config{
+	databasePath := path.Join(storageDir, "sqlite.db")
+	// SQLite contains password hashes and session credentials. Restrict new
+	// files while preserving the permissions of existing deployment volumes.
+	file, err := os.OpenFile(databasePath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		logger.Fatal("create storage database failed: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		logger.Fatal("close storage database failed: %v", err)
+	}
+	db, err = gorm.Open(sqlite.Open(databasePath), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
