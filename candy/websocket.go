@@ -43,6 +43,11 @@ func WebsocketMiddleware() gin.HandlerFunc {
 }
 
 func handleWebsocket(c *gin.Context) {
+	if !beginWebsocketHandler() {
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	defer endWebsocketHandler()
 	net := getNetByPath(c.Request.URL.Path)
 	if net == nil {
 		c.Status(http.StatusNotFound)
@@ -64,6 +69,10 @@ func handleWebsocket(c *gin.Context) {
 	defer conn.Close()
 	conn.SetReadLimit(maxWebsocketMessageSize)
 	ws := &candysocket{ctx: c, conn: conn, net: net, authDeadline: time.Now().Add(websocketAuthTimeout)}
+	if !trackWebsocket(ws) {
+		return
+	}
+	defer untrackWebsocket(ws)
 	net.ipWsMapMutex.Lock()
 	if net.closed {
 		net.ipWsMapMutex.Unlock()

@@ -3,7 +3,9 @@ package candy
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
 )
@@ -36,5 +38,42 @@ func TestAuthenticatedPingBatchesMetadata(t *testing.T) {
 	}
 	if persisted.Hostname != "batch-host" || persisted.OS != "linux" {
 		t.Fatal("shared flush did not persist metadata")
+	}
+}
+
+func TestShutdownWaitsForSocketsAndFlushesDisconnects(t *testing.T) {
+	n, url := newTestWebsocketNetwork(t, "10.20.0.0/24")
+	online := dialTestWebsocket(t, url)
+	authenticateTestWebsocket(t, online, n, "1000000000000012", 0x0a140001)
+	pending := dialTestWebsocket(t, url)
+	sendVMac(t, pending, n, "1000000000000013")
+	t.Cleanup(func() {
+		// Production shutdown is terminal. Restore admission only for tests.
+		websocketLifecycle.Lock()
+		websocketLifecycle.stopping = false
+		websocketLifecycle.Unlock()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ShutdownConnections(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, conn := range []*websocket.Conn{online, pending} {
+		if _, _, err := conn.ReadMessage(); err == nil {
+			t.Fatal("websocket survived shutdown")
+		}
+	}
+	n.ipWsMapMutex.RLock()
+	remaining := len(n.connections)
+	n.ipWsMapMutex.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("shutdown left %d connection callbacks running", remaining)
+	}
+	var persisted model.Device
+	if err := storage.Get().Where("net_id = ? AND vmac = ?", n.model.ID, "1000000000000012").First(&persisted).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Online || persisted.RX == 0 {
+		t.Fatalf("shutdown did not persist final telemetry: %+v", persisted)
 	}
 }

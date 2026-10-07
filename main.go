@@ -9,8 +9,11 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"path"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +23,7 @@ import (
 	"github.com/lanthora/cacao/frontend"
 	"github.com/lanthora/cacao/logger"
 	"github.com/lanthora/cacao/model"
+	"github.com/lanthora/cacao/storage"
 	"github.com/lanthora/cacao/util"
 )
 
@@ -28,22 +32,35 @@ func init() {
 }
 
 func main() {
+	if err := run(); err != nil {
+		logger.Fatal("service failed: %v", err)
+	}
+}
+
+func run() (result error) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if err := model.EnsureIntegrity(); err != nil {
-		logger.Fatal("install database integrity failed: %v", err)
+		return err
 	}
 	tasks, err := newBackgroundTasks()
 	if err != nil {
-		logger.Fatal("register background tasks failed: %v", err)
+		return err
 	}
-	if err := tasks.Start(context.Background()); err != nil {
-		logger.Fatal("start background tasks failed: %v", err)
+	if err := tasks.Start(ctx); err != nil {
+		return err
 	}
-	defer tasks.Stop(context.Background())
 	api.SetBackgroundTasks(tasks)
-
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		result = errors.Join(result, tasks.Stop(shutdownCtx))
+		result = errors.Join(result, candy.ShutdownConnections(shutdownCtx))
+		result = errors.Join(result, storage.Shutdown(shutdownCtx))
+	}()
 	r, err := newRouter(argp.Get("trusted-proxies", ""))
 	if err != nil {
-		logger.Fatal("invalid trusted proxies: %v", err)
+		return err
 	}
 
 	storageDir := argp.Get("storage", ".")
@@ -52,15 +69,33 @@ func main() {
 	if findCrtErr == nil && findKeyErr == nil {
 		addr := argp.Get("listen", ":443")
 		logger.Info("listen=[%v]", addr)
-		if err := newHTTPServer(addr, r).ListenAndServeTLS(path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename)); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatal("tls service run failed: %v", err)
-		}
+		return serve(ctx, newHTTPServer(addr, r), path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename))
 	} else {
 		addr := argp.Get("listen", ":80")
 		logger.Info("listen=[%v]", addr)
-		if err := newHTTPServer(addr, r).ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatal("service run failed: %v", err)
+		return serve(ctx, newHTTPServer(addr, r), "", "")
+	}
+}
+
+func serve(ctx context.Context, server *http.Server, cert, key string) error {
+	done := make(chan error, 1)
+	go func() {
+		if cert != "" {
+			done <- server.ListenAndServeTLS(cert, key)
+		} else {
+			done <- server.ListenAndServe()
 		}
+	}()
+	select {
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
 	}
 }
 
