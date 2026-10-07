@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -123,7 +124,7 @@ func DeleteUserTree(userID uint) ([]uint, error) {
 		return nil, gorm.ErrRecordNotFound
 	}
 	var netIDs []uint
-	err := storage.Write(func(tx *gorm.DB) error {
+	err := WriteDeletingDevices(context.Background(), userID, 0, func(tx *gorm.DB) error {
 		if err := tx.Unscoped().Model(&Net{}).Where("user_id = ?", userID).Pluck("id", &netIDs).Error; err != nil {
 			return err
 		}
@@ -149,7 +150,7 @@ func DeleteNetworkTree(netID, ownerID uint) error {
 	if netID == 0 || ownerID == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	return storage.Write(func(tx *gorm.DB) error {
+	return WriteDeletingDevices(context.Background(), ownerID, netID, func(tx *gorm.DB) error {
 		var network Net
 		if err := tx.Unscoped().Where("id = ? AND user_id = ?", netID, ownerID).Take(&network).Error; err != nil {
 			return err
