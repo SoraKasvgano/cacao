@@ -76,11 +76,15 @@ func UserInfo(c *gin.Context) {
 
 func UserStatistics(c *gin.Context) {
 	user := c.MustGet("user").(*model.User)
+	statistics, err := model.GetUserStatistics(user.ID)
+	if !writeSucceeded(c, err) {
+		return
+	}
 	setResponseData(c, gin.H{
-		"netnum": uint(len(model.GetNetsByUserID(user.ID))),
-		"devnum": uint(len(model.GetDevicesByUserID(user.ID))),
-		"rxsum":  model.GetRxSumByUserID(user.ID),
-		"txsum":  model.GetTxSumByUserID(user.ID),
+		"netnum": statistics.NetNum,
+		"devnum": statistics.DevNum,
+		"rxsum":  statistics.RxSum,
+		"txsum":  statistics.TxSum,
 	})
 }
 

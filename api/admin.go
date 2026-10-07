@@ -40,7 +40,10 @@ func AdminMiddleware() gin.HandlerFunc {
 }
 
 func AdminShowUsers(c *gin.Context) {
-	users := model.GetUsers()
+	users, err := model.GetUsersWithStatistics()
+	if !writeSucceeded(c, err) {
+		return
+	}
 
 	type userinfo struct {
 		UserID         uint   `json:"userid"`
@@ -61,11 +64,11 @@ func AdminShowUsers(c *gin.Context) {
 			Username:       u.Name,
 			Role:           u.Role,
 			RegTime:        u.CreatedAt.Format(time.DateTime),
-			LastActiveTime: model.GetLastActiveTimeByUserID(u.ID).Format(time.DateTime),
-			NetNum:         uint(len(model.GetNetsByUserID(u.ID))),
-			DevNum:         uint(len(model.GetDevicesByUserID(u.ID))),
-			RxSum:          model.GetRxSumByUserID(u.ID),
-			TxSum:          model.GetTxSumByUserID(u.ID),
+			LastActiveTime: u.UpdatedAt.Format(time.DateTime),
+			NetNum:         u.NetNum,
+			DevNum:         u.DevNum,
+			RxSum:          u.RxSum,
+			TxSum:          u.TxSum,
 		})
 	}
 
