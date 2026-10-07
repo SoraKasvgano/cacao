@@ -22,6 +22,9 @@ export default {
     loading: {
         title: 'Loading'
     },
+    security: {
+        requestFailed: 'Request failed. Please try again later.'
+    },
     user: {
         title: 'User',
         subtitle: 'user information',

@@ -23,7 +23,7 @@ import { ref } from 'vue'
 import { LOCAL_LANGUAGE_KEY } from './i18n'
 
 const router = useRouter()
-const { locale } = useI18n()
+const { locale, t } = useI18n()
 const currentLang = ref(locale.value)
 
 const handleLangChange = (value) => {
@@ -47,6 +47,13 @@ axios.interceptors.response.use(
   },
   (error) => {
     if (error.config?.skipAuthRedirect) return Promise.reject(error)
+    const status = error.response?.status
+    message.warning(error.response?.data?.msg || t('security.requestFailed'))
+    if (status === 401) {
+      router.replace('/login')
+    } else if (status === 403 && !router.currentRoute.value.meta.public) {
+      router.replace('/')
+    }
     return Promise.reject(error)
   }
 )

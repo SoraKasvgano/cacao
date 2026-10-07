@@ -18,6 +18,7 @@
           >
             <a-input
               v-model:value="loginState.username"
+              autocomplete="username"
               :placeholder="$t('login.username')"
               size="large"
             >
@@ -33,6 +34,7 @@
           >
             <a-input-password
               v-model:value="loginState.password"
+              autocomplete="current-password"
               :placeholder="$t('login.password')"
               size="large"
             >
@@ -48,6 +50,7 @@
               html-type="submit"
               size="large"
               class="login-button"
+              :loading="submitting"
             >
               {{ $t('login.login') }}
             </a-button>
@@ -72,6 +75,7 @@ import axios from 'axios'
 import { UserOutlined, LockOutlined } from '@ant-design/icons-vue'
 
 const router = useRouter()
+const submitting = ref(false)
 
 const loginState = ref({
   username: '',
@@ -79,14 +83,21 @@ const loginState = ref({
 })
 
 const onFinish = async (values) => {
-  const response = await axios.post('/api/user/login', {
-    username: values.username,
-    password: values.password
-  })
-
-  const status = response.data.status
-  if (status == 0) {
-    router.push('/')
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    const response = await axios.post('/api/user/login', {
+      username: values.username,
+      password: values.password
+    })
+    if (response.data.status === 0) {
+      loginState.value.password = ''
+      router.replace('/')
+    }
+  } catch {
+    // The global API interceptor displays request failures, including rate limits.
+  } finally {
+    submitting.value = false
   }
 }
 </script>

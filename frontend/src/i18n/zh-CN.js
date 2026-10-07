@@ -22,6 +22,9 @@ export default {
     loading: {
         title: '加载中'
     },
+    security: {
+        requestFailed: '请求失败，请稍后重试'
+    },
     user: {
         title: '用户',
         subtitle: '用户信息',
