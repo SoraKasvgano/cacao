@@ -14,6 +14,7 @@
           </a-space>
           <a-table :columns="netColumns" :dataSource="netSource" :scroll="{ x: 'max-content' }">
             <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'password'">••••••••</template>
               <template v-if="column.key === 'action'">
                 <a-space wrap>
                   <a-button type="primary" size="small" @click="openNetDialog(record)">
@@ -36,8 +37,9 @@
               />
             </a-form-item>
             <a-form-item>
-              <a-input 
+              <a-input-password
                 v-model:value="netDialogState.password" 
+                autocomplete="new-password"
                 :placeholder="$t('network.inputPassword')"
               />
             </a-form-item>
