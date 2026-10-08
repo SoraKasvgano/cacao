@@ -1,0 +1,15 @@
+services:
+  cacao:
+    image: cacao:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.dist
+    container_name: cacao
+    restart: unless-stopped
+    environment:
+      - CACAO_SETUP_TOKEN=${CACAO_SETUP_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./data:/var/lib/cacao

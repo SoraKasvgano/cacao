@@ -1,5 +1,7 @@
 cacao
 cacao-*
+/dist/
+.env
 sqlite.db
 sqlite.db-wal
 sqlite.db-shm

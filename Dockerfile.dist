@@ -1,0 +1,8 @@
+FROM scratch
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG TARGETVARIANT=
+VOLUME /var/lib/cacao
+COPY dist/cacao-${TARGETOS}-${TARGETARCH}${TARGETVARIANT} /usr/bin/cacao
+ENTRYPOINT ["/usr/bin/cacao"]
+CMD ["--storage=/var/lib/cacao"]
