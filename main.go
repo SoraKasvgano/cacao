@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,51 +69,181 @@ func run() (result error) {
 	}
 
 	storageDir := argp.Get("storage", ".")
-	crtFilename, findCrtErr := util.FindFileByExtFromDir(storageDir, ".crt")
-	keyFilename, findKeyErr := util.FindFileByExtFromDir(storageDir, ".key")
-	if findCrtErr == nil && findKeyErr == nil {
-		addr := argp.Get("listen", ":443")
-		logger.Info("listen=[%v]", addr)
-		return serve(ctx, newHTTPServer(addr, r), path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename))
-	} else {
-		addr := argp.Get("listen", ":80")
-		logger.Info("listen=[%v]", addr)
-		return serve(ctx, newHTTPServer(addr, r), "", "")
+	certFile, keyFile := tlsFiles(storageDir)
+	addr := argp.Get("listen", defaultListen(certFile))
+	instance, err := startHTTPServer(addr, r, certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	logger.Info("listen=[%v]", addr)
+
+	// config.toml and certificate files are picked up while running: settings
+	// swap in on every tick, a new listen address is bound before the old one
+	// is drained, and a failed bind keeps the previous server serving.
+	configTicker := time.NewTicker(2 * time.Second)
+	defer configTicker.Stop()
+	var reloadWarned, bindWarned string
+	for {
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return instance.srv.Shutdown(shutdownCtx)
+		case err := <-instance.done:
+			// The current server stopped without being replaced or shut down.
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		case <-configTicker.C:
+			changed, err := argp.Reload()
+			if err != nil {
+				if err.Error() != reloadWarned {
+					logger.Warn("config reload failed: %v (keeping previous settings)", err)
+					reloadWarned = err.Error()
+				}
+				continue
+			}
+			reloadWarned = ""
+			if changed {
+				if err := logger.SetLevel(argp.Get("loglevel", "info")); err != nil {
+					logger.Warn("config: %v (keeping previous log level)", err)
+				}
+				if err := applyTrustedProxies(r, argp.Get("trusted-proxies", "")); err != nil {
+					logger.Warn("config: %v (keeping previous trusted proxies)", err)
+				}
+				logger.Info("config reloaded: listen=[%v] loglevel=[%v]",
+					argp.Get("listen", ""), argp.Get("loglevel", "info"))
+			}
+			newCert, newKey := tlsFiles(storageDir)
+			newAddr := argp.Get("listen", defaultListen(newCert))
+			if newAddr != instance.addr || newCert != instance.certFile || newKey != instance.keyFile ||
+				fileModTime(newCert) != instance.certMod || fileModTime(newKey) != instance.keyMod {
+				next, err := startHTTPServer(newAddr, r, newCert, newKey)
+				if err != nil {
+					if err.Error() != bindWarned {
+						logger.Warn("listen=[%v]: %v (still serving on [%v])", newAddr, err, instance.addr)
+						bindWarned = err.Error()
+					}
+					continue
+				}
+				bindWarned = ""
+				logger.Info("listen=[%v]", newAddr)
+				old := instance
+				instance = next
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				_ = old.srv.Shutdown(shutdownCtx)
+				cancel()
+			}
+		}
 	}
 }
 
-func serve(ctx context.Context, server *http.Server, cert, key string) error {
-	done := make(chan error, 1)
-	go func() {
-		if cert != "" {
-			done <- server.ListenAndServeTLS(cert, key)
-		} else {
-			done <- server.ListenAndServe()
+// serverInstance is one bound listener plus the configuration it was started
+// with, so the reload loop can detect when that configuration drifts.
+type serverInstance struct {
+	srv               *http.Server
+	addr              string
+	certFile, keyFile string
+	certMod, keyMod   time.Time
+	done              chan error
+}
+
+// startHTTPServer binds before anything is handed over: at startup a failure
+// is fatal, during reload it keeps the previous instance serving.
+func startHTTPServer(addr string, handler http.Handler, certFile, keyFile string) (*serverInstance, error) {
+	if certFile != "" {
+		if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+			return nil, fmt.Errorf("load TLS certificate: %w", err)
 		}
-	}()
-	select {
-	case err := <-done:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	instance := &serverInstance{
+		srv:      newHTTPServer(addr, handler),
+		addr:     addr,
+		certFile: certFile,
+		keyFile:  keyFile,
+		certMod:  fileModTime(certFile),
+		keyMod:   fileModTime(keyFile),
+		done:     make(chan error, 1),
+	}
+	go func() {
+		var err error
+		if certFile != "" {
+			err = instance.srv.ServeTLS(listener, certFile, keyFile)
+		} else {
+			err = instance.srv.Serve(listener)
+		}
+		instance.done <- err
+	}()
+	return instance, nil
+}
+
+func tlsFiles(storageDir string) (certFile, keyFile string) {
+	crtFilename, findCrtErr := util.FindFileByExtFromDir(storageDir, ".crt")
+	keyFilename, findKeyErr := util.FindFileByExtFromDir(storageDir, ".key")
+	if findCrtErr == nil && findKeyErr == nil {
+		return path.Join(storageDir, crtFilename), path.Join(storageDir, keyFilename)
+	}
+	return "", ""
+}
+
+func defaultListen(certFile string) string {
+	if certFile != "" {
+		return ":443"
+	}
+	return ":80"
+}
+
+func fileModTime(path string) time.Time {
+	if path == "" {
+		return time.Time{}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// parseTrustedProxies splits and validates the trusted-proxies config value.
+// Gin only accepts IPs and CIDR networks (never domain names) and leaves its
+// proxy table in a degraded-but-safe state when given an invalid entry, so
+// validation happens before anything is handed to the engine.
+func parseTrustedProxies(value string) ([]string, error) {
+	var proxies []string
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("trusted-proxies: invalid network %q", entry)
+			}
+		} else if net.ParseIP(entry) == nil {
+			return nil, fmt.Errorf("trusted-proxies: invalid IP address %q", entry)
+		}
+		proxies = append(proxies, entry)
+	}
+	return proxies, nil
+}
+
+func applyTrustedProxies(r *gin.Engine, value string) error {
+	proxies, err := parseTrustedProxies(value)
+	if err != nil {
+		return err
+	}
+	return r.SetTrustedProxies(proxies)
 }
 
 func newRouter(trustedProxies string) (*gin.Engine, error) {
 	r := gin.New()
-	var proxies []string
-	if strings.TrimSpace(trustedProxies) != "" {
-		for _, proxy := range strings.Split(trustedProxies, ",") {
-			proxies = append(proxies, strings.TrimSpace(proxy))
-		}
-	}
 	// Forwarded client addresses must only come from explicitly trusted proxies.
-	if err := r.SetTrustedProxies(proxies); err != nil {
+	if err := applyTrustedProxies(r, trustedProxies); err != nil {
 		return nil, err
 	}
 	// Gin's default panic logger dumps request headers, including session cookies.

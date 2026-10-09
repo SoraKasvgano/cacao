@@ -13,14 +13,24 @@ func init() {
 	logger.SetReportCaller(true)
 	logger.SetFormatter(&logFormatter{})
 
-	switch argp.Get("loglevel", "info") {
+	// An unknown level keeps the logrus default (info), as before.
+	_ = SetLevel(argp.Get("loglevel", "info"))
+
+	Info("loglevel=[%v]", logger.GetLevel().String())
+}
+
+// SetLevel applies a config log level. Invalid levels leave the current level
+// untouched and are reported to the caller.
+func SetLevel(level string) error {
+	switch level {
 	case "debug":
 		logger.SetLevel(logrus.DebugLevel)
 	case "info":
 		logger.SetLevel(logrus.InfoLevel)
+	default:
+		return fmt.Errorf("unknown loglevel %q (want \"debug\" or \"info\")", level)
 	}
-
-	Info("loglevel=[%v]", logger.GetLevel().String())
+	return nil
 }
 
 var logger *logrus.Logger
@@ -45,4 +55,8 @@ func Info(format string, args ...interface{}) {
 
 func Debug(format string, args ...interface{}) {
 	logger.Debugf(format, args...)
+}
+
+func Warn(format string, args ...interface{}) {
+	logger.Warnf(format, args...)
 }

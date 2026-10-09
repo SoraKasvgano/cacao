@@ -3,6 +3,7 @@ package argp
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -153,7 +154,10 @@ func TestMaintainConfigAppendsBeforeTables(t *testing.T) {
 	if !strings.Contains(text, "# keep this comment") {
 		t.Fatal("existing comment lost")
 	}
-	if strings.Index(text, "loglevel") > strings.Index(text, "[misc]") {
+	// Match the key assignment itself; example comments also mention it.
+	keyLine := regexp.MustCompile(`(?m)^loglevel = `)
+	loc := keyLine.FindStringIndex(text)
+	if loc == nil || loc[0] > strings.Index(text, "[misc]") {
 		t.Fatal("keys appended after table header would not parse at top level")
 	}
 	if err := MaintainConfig(); err != nil {
@@ -163,7 +167,7 @@ func TestMaintainConfigAppendsBeforeTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := strings.Count(string(data), "loglevel"); count != 1 {
+	if count := len(keyLine.FindAllString(string(data), -1)); count != 1 {
 		t.Fatalf("key duplicated across runs: %d occurrences", count)
 	}
 }
@@ -186,5 +190,48 @@ func TestMaintainConfigFailsClosedOnBrokenFile(t *testing.T) {
 	}
 	if string(data) != "loglevel = \n" {
 		t.Fatal("broken config file was modified")
+	}
+}
+
+func TestReloadSwapsAndKeepsValues(t *testing.T) {
+	path := loadTempConfig(t, "loglevel = \"info\"\n")
+	if got := Get("loglevel", "fallback"); got != "info" {
+		t.Fatalf("initial value: %q", got)
+	}
+	if err := os.WriteFile(path, []byte("loglevel = \"info\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := Reload()
+	if err != nil || changed {
+		t.Fatalf("unchanged reload: changed=%v err=%v", changed, err)
+	}
+	if err := os.WriteFile(path, []byte("loglevel = \"debug\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = Reload()
+	if err != nil || !changed {
+		t.Fatalf("modified reload: changed=%v err=%v", changed, err)
+	}
+	if got := Get("loglevel", "fallback"); got != "debug" {
+		t.Fatalf("reloaded value: %q", got)
+	}
+	if err := os.WriteFile(path, []byte("loglevel = \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Reload(); err == nil {
+		t.Fatal("broken config accepted by Reload")
+	}
+	if got := Get("loglevel", "fallback"); got != "debug" {
+		t.Fatalf("broken reload must keep previous value: %q", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = Reload()
+	if err != nil || changed {
+		t.Fatalf("removed file: changed=%v err=%v", changed, err)
+	}
+	if got := Get("loglevel", "fallback"); got != "debug" {
+		t.Fatalf("removed file must keep previous value: %q", got)
 	}
 }

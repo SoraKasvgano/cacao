@@ -205,3 +205,41 @@ func TestPanicRecoveryDoesNotExposeDetails(t *testing.T) {
 		t.Fatalf("unexpected panic response: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestParseTrustedProxies(t *testing.T) {
+	cases := []struct {
+		value string
+		want  []string
+	}{
+		{"", nil},
+		{"  ", nil},
+		{"203.0.113.5", []string{"203.0.113.5"}},
+		{" 192.168.0.0/16 , 10.0.0.1", []string{"192.168.0.0/16", "10.0.0.1"}},
+		{"2001:db8::1", []string{"2001:db8::1"}},
+	}
+	for _, item := range cases {
+		got, err := parseTrustedProxies(item.value)
+		if err != nil {
+			t.Fatalf("parseTrustedProxies(%q): %v", item.value, err)
+		}
+		if len(got) != len(item.want) {
+			t.Fatalf("parseTrustedProxies(%q) = %v, want %v", item.value, got, item.want)
+		}
+		for i := range got {
+			if got[i] != item.want[i] {
+				t.Fatalf("parseTrustedProxies(%q) = %v, want %v", item.value, got, item.want)
+			}
+		}
+	}
+	for _, value := range []string{"example.com", "999.1.1.1", "10.0.0.0/99", "10.0.0.1/8/8"} {
+		if _, err := parseTrustedProxies(value); err == nil {
+			t.Fatalf("parseTrustedProxies(%q) accepted an invalid entry", value)
+		}
+	}
+}
+
+func TestNewRouterRejectsInvalidTrustedProxies(t *testing.T) {
+	if _, err := newRouter("not-an-ip"); err == nil {
+		t.Fatal("invalid trusted-proxies accepted")
+	}
+}
