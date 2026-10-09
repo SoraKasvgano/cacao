@@ -5,6 +5,7 @@
       :hideRequiredMark="true"
       name="register"
       class="register-form"
+      layout="vertical"
       @finish="onFinish"
     >
       <a-form-item 
