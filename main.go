@@ -38,6 +38,9 @@ func main() {
 }
 
 func run() (result error) {
+	if err := argp.MaintainConfig(); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := model.EnsureIntegrity(); err != nil {

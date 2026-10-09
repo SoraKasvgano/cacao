@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lanthora/cacao/argp"
 	"github.com/lanthora/cacao/model"
 	"github.com/lanthora/cacao/storage"
 )
@@ -248,6 +251,26 @@ func TestSetupRequiresSecret(t *testing.T) {
 	}
 	if _, status := securityRequest(t, r, "/api/user/register", fmt.Sprintf(`{"username":"attacker","password":"password","setupToken":%q}`, secret)); status != RegistrationDisabled {
 		t.Fatal("setup secret remained usable after initialization")
+	}
+}
+
+func TestSetupTokenFallsBackToConfig(t *testing.T) {
+	t.Setenv("CACAO_SETUP_TOKEN", "")
+	token := strings.Repeat("c", 32)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("setup-token = %q\n", token)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := argp.LoadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { argp.LoadConfig("") })
+	if validSetupToken("wrong") || !validSetupToken(token) {
+		t.Fatal("config setup token rejected")
+	}
+	t.Setenv("CACAO_SETUP_TOKEN", strings.Repeat("d", 32))
+	if validSetupToken(token) {
+		t.Fatal("environment setup token did not take precedence over config")
 	}
 }
 

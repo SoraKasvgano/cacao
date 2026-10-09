@@ -10,3 +10,5 @@ cookie
 *.crt
 *.key
 .history
+config.toml
+/data/

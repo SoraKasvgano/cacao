@@ -89,8 +89,18 @@ func setSessionCookies(c *gin.Context, userID uint, token string, maxAge int) {
 	c.SetCookie("token", token, maxAge, "/", "", secure, true)
 }
 
-func validSetupToken(supplied string) bool {
+// The environment variable wins over config.toml, and there is deliberately
+// no command-line flag: arguments are visible in the process list.
+func expectedSetupToken() string {
 	expected := os.Getenv("CACAO_SETUP_TOKEN")
+	if expected == "" {
+		expected = argp.Config("setup-token")
+	}
+	return expected
+}
+
+func validSetupToken(supplied string) bool {
+	expected := expectedSetupToken()
 	if len(expected) < 32 || supplied == "" {
 		return false
 	}
